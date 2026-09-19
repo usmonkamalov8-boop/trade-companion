@@ -1,0 +1,17 @@
+{
+  "halted": false,
+  "profiles": {
+    "hier": {
+      "enabled": true,
+      "shadow": false,
+      "risk_pct": 1.0,
+      "max_positions": 3
+    },
+    "scalp": {
+      "enabled": true,
+      "shadow": true,
+      "risk_pct": 1.0,
+      "max_positions": 2
+    }
+  }
+}

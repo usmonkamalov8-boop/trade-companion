@@ -1,0 +1,18 @@
+name: trade_companion
+description: Trading companion for the crypto bot (dashboard, charts, assistant, markets)
+publish_to: none
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.2
+  flutter_secure_storage: ^9.2.2
+  webview_flutter: ^4.10.0
+  url_launcher: ^6.3.1
+
+flutter:
+  uses-material-design: true
