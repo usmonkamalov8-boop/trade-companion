@@ -78,7 +78,7 @@ class _SettingsPageState extends State<SettingsPage> {
             Panel(child: Text(result, style: TextStyle(color: ok ? C.gain : C.loss))),
           const SizedBox(height: 16),
           const Text(
-            'The token is kept in Android encrypted storage. Traffic to your VPS is plain HTTP '
+            'The token is stored privately inside this app. Traffic to your VPS is plain HTTP '
             'unless you put HTTPS in front of the server, so keep the token private.',
             style: TextStyle(color: C.muted, fontSize: 12.5, height: 1.4),
           ),

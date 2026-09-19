@@ -1,23 +1,24 @@
 import 'dart:convert';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 
 class Api {
-  static const _store = FlutterSecureStorage();
   static String host = '185.196.117.48:8000';
   static String token = '';
   static bool get ready => host.isNotEmpty && token.isNotEmpty;
 
   static Future<void> load() async {
-    host = await _store.read(key: 'host') ?? host;
-    token = await _store.read(key: 'token') ?? '';
+    final p = await SharedPreferences.getInstance();
+    host = p.getString('host') ?? host;
+    token = p.getString('token') ?? '';
   }
 
   static Future<void> save(String h, String t) async {
     host = h.trim();
     token = t.trim();
-    await _store.write(key: 'host', value: host);
-    await _store.write(key: 'token', value: token);
+    final p = await SharedPreferences.getInstance();
+    await p.setString('host', host);
+    await p.setString('token', token);
   }
 
   static Uri _uri(String path, [Map<String, String>? q]) {
