@@ -1,41 +1,99 @@
-name: Build Flutter APK
+name: Build APK
 
+# Runs on every push to main; you can also start it from your phone:
+# GitHub > your repo > Actions > Build APK > Run workflow.
 on:
   push:
-    branches: [ main ]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: flutter_app
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Java
-        uses: actions/setup-java@v5
+      - uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: temurin
           java-version: '17'
 
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.0'
-          channel: 'stable'
+          channel: stable
+          cache: true
 
-      - name: Upgrade project and get dependencies
+      - name: Generate Android project
+        run: flutter create --platforms=android --project-name trade_companion --org dev.tradecompanion .
+
+      - name: Patch manifest (internet, plain HTTP, app name)
         run: |
-          cd flutter_app
-          flutter pub upgrade
-          flutter create . --platforms=android
+          M=android/app/src/main/AndroidManifest.xml
+          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/><application android:usesCleartextTraffic="true"#' $M
+          sed -i 's#android:label="[^"]*"#android:label="Trade Companion"#' $M
+
+      - name: Use the newest Kotlin plugin
+        run: |
+          python3 - << 'PY'
+          import re, urllib.request, glob
+          url = "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-gradle-plugin/maven-metadata.xml"
+          xml = urllib.request.urlopen(url, timeout=30).read().decode()
+          vs = re.findall(r"<version>(\d+\.\d+\.\d+)</version>", xml)
+          kv = sorted(vs, key=lambda v: tuple(map(int, v.split("."))))[-1]
+          f = (glob.glob("android/settings.gradle.kts") + glob.glob("android/settings.gradle"))[0]
+          s = open(f).read()
+          pat = re.compile(r'(org\.jetbrains\.kotlin\.android"\)? version ")[^"]+(")')
+          if pat.search(s):
+              s = pat.sub(lambda m: m.group(1) + kv + m.group(2), s)
+              print("updated existing Kotlin plugin line")
+          else:
+              if f.endswith(".kts"):
+                  line = '    id("org.jetbrains.kotlin.android") version "%s" apply false' % kv
+              else:
+                  line = '    id "org.jetbrains.kotlin.android" version "%s" apply false' % kv
+              s, n = re.subn(r"(\n[^\n]*com\.android\.application[^\n]*\n)", lambda m: m.group(1) + line + "\n", s, count=1)
+              print("added Kotlin plugin line" if n else "WARNING: could not add Kotlin plugin line")
+          open(f, "w").write(s)
+          print("Kotlin", kv, "->", f)
+          PY
 
       - name: Build APK
         run: |
-          cd flutter_app
-          flutter build apk --release
+          flutter pub get
+          set -o pipefail
+          flutter build apk --release 2>&1 | tee build.log
 
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
+      - name: Explain failure
+        if: failure()
+        run: |
+          set +e
+          {
+            echo "### Build errors"
+            echo '```'
+            grep -n -E "^e: |What went wrong|Execution failed|incompatible version|metadata|Could not (resolve|find|get)|FAILURE:" build.log | cut -c1-260 | head -25
+            echo
+            flutter --version | head -2
+            grep -n -E "flutter_secure_storage|shared_preferences|webview|url_launcher" pubspec.yaml
+            grep -n -E "kotlin|com.android" android/settings.gradle*
+            grep -n "distributionUrl" android/gradle/wrapper/gradle-wrapper.properties
+            cat android/gradle.properties
+            echo '```'
+          } 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: app-release
+          name: trade-companion-apk
           path: flutter_app/build/app/outputs/flutter-apk/app-release.apk
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Trade Companion build ${{ github.run_number }}
+          files: flutter_app/build/app/outputs/flutter-apk/app-release.apk
