@@ -391,6 +391,44 @@ def liquidity(alt, c, atr_now):
             "eqh": pools(hs), "eql": pools(ls), "sweeps": sweeps[-2:]}
 
 
+def _rsi_series(cl, n=14):
+    out = [None] * len(cl)
+    if len(cl) < n + 2:
+        return out
+    g = l_ = 0.0
+    for i in range(1, n + 1):
+        d = cl[i] - cl[i - 1]
+        g += max(d, 0)
+        l_ += max(-d, 0)
+    ag, al = g / n, l_ / n
+    out[n] = 100.0 if al == 0 else 100 - 100 / (1 + ag / al)
+    for i in range(n + 1, len(cl)):
+        d = cl[i] - cl[i - 1]
+        ag = (ag * (n - 1) + max(d, 0)) / n
+        al = (al * (n - 1) + max(-d, 0)) / n
+        out[i] = 100.0 if al == 0 else 100 - 100 / (1 + ag / al)
+    return out
+
+
+def divergence(alt, rs, n):
+    """Regular RSI divergence between the last two swing points (only if the latest one is recent)."""
+    best = None
+    for typ, want in (("H", "bearish"), ("L", "bullish")):
+        pts = [p for p in alt if p[2] == typ][-2:]
+        if len(pts) < 2 or pts[1][0] < n - 40 or rs[pts[0][0]] is None or rs[pts[1][0]] is None:
+            continue
+        (i1, p1, _), (i2, p2, _) = pts
+        if typ == "H" and p2 > p1 and rs[i2] < rs[i1] - 3:
+            cand = {"type": want, "idx": i2}
+        elif typ == "L" and p2 < p1 and rs[i2] > rs[i1] + 3:
+            cand = {"type": want, "idx": i2}
+        else:
+            continue
+        if best is None or cand["idx"] > best["idx"]:
+            best = cand
+    return best
+
+
 def analyze_tf(c, tf):
     n = len(c["c"])
     if n < (18 if tf == "1M" else 30 if tf == "1w" else 40):
@@ -406,7 +444,15 @@ def analyze_tf(c, tf):
     obs, breakers = order_blocks(c, st, atr)
     ema = {x: (A.ema(c["c"], x) or [None])[-1] for x in (20, 50, 200)}
     win = atr[-60:]
+    rs = _rsi_series(c["c"])
+    v = c.get("v") or []
+    vr = None
+    if len(v) >= 40 and sum(v[-40:]) > 0:
+        base_v = sum(v[-34:-4]) / 30.0
+        if base_v > 0:
+            vr = (sum(v[-4:-1]) / 3.0) / base_v        # last 3 closed bars against the previous 30
     return {
+        "rsi": rs[-1], "macd": A.macd_hist(c["c"]), "div": divergence(alt, rs, n), "vol_ratio": vr,
         "tf": tf, "n": n, "price": px, "atr": a, "atr_pct": a / px * 100, "atr_ratio": a / (sum(win) / len(win)),
         "trend": trend, "trend_label": label if sw else ("structure " + ("up" if st["trend"] == 1 else "down" if st["trend"] == -1 else "flat")),
         "events": st["events"][-4:], "last_event": st["events"][-1] if st["events"] else None,
@@ -592,7 +638,107 @@ def _dirword(d):
     return "Bullish" if d == 1 else ("Bearish" if d == -1 else "Neutral")
 
 
-def make_setup(name, style, per, ict, dec, mods, kind, per_all=None):
+def exposure(name, kind):
+    """Which currencies' news moves this asset, and how strongly."""
+    if kind == "crypto":
+        return {"USD": 0.6}
+    if name == "XAUUSD":
+        return {"USD": 1.0}
+    if name == "DXY":
+        return {"USD": 1.0, "EUR": 0.5, "GBP": 0.3, "JPY": 0.3}
+    if len(name) == 6:
+        return {name[:3]: 1.0, name[3:]: 1.0}
+    return {}
+
+
+def news_effect(name, kind, news):
+    """Confidence penalty from scheduled news. news = upcoming events (currency, impact, title, mins).
+    Penalty grows as a release gets close and lingers for 45 minutes after it (volatility, spreads)."""
+    if news is None:
+        return None
+    ex = exposure(name, kind)
+    worst, pts, hold, events = None, 0, False, []
+    for e in news:
+        w = ex.get(e["currency"])
+        if not w:
+            continue
+        m = e["mins"]
+        imp = 1.0 if e["impact"] == "high" else 0.5
+        if 0 <= m <= 15:
+            base = 25
+        elif 15 < m <= 30:
+            base = 15
+        elif 30 < m <= 60:
+            base = 8
+        elif 60 < m <= 120:
+            base = 3
+        elif -45 <= m < 0:
+            base = 12
+        else:
+            continue
+        p = int(round(base * w * imp))
+        events.append({"title": e["title"], "currency": e["currency"], "mins": m, "impact": e["impact"], "pts": p})
+        if p > pts:
+            pts, worst = p, events[-1]
+        if e["impact"] == "high" and -5 <= m <= 15:
+            hold = True
+    events.sort(key=lambda x: -x["pts"])
+    return {"pts": pts, "hold": hold, "worst": worst, "events": events[:3]}
+
+
+def _when(m):
+    if m >= 0:
+        return f"in {m} min"
+    return f"{-m} min ago"
+
+
+def observations(s, per, per_all, style, kind, ict):
+    """Context that is shown next to the score but not part of it yet: RSI, MACD, divergence, volume."""
+    cfg = STYLES[style]
+    out = []
+    word = "long" if s == 1 else "short"
+    for role in ("bias", "setup"):
+        a = per.get(role)
+        if not a:
+            continue
+        tf = tfl(a["tf"])
+        r = a.get("rsi")
+        if r is not None:
+            if s == 1 and r >= 70:
+                out.append({"text": f"RSI {tf} is {r:.0f} (overbought): stretched for a long.", "against": True})
+            elif s == -1 and r <= 30:
+                out.append({"text": f"RSI {tf} is {r:.0f} (oversold): stretched for a short.", "against": True})
+        mh = a.get("macd")
+        if mh and mh[0] is not None and mh[1] is not None:
+            h, hp = mh
+            if (s == 1 and h < 0 and h < hp) or (s == -1 and h > 0 and h > hp):
+                out.append({"text": f"{tf} MACD histogram is {'negative' if h < 0 else 'positive'} and {'falling' if h < hp else 'rising'}: momentum is against the {word}.", "against": True})
+            elif (s == 1 and h > 0 and h >= hp) or (s == -1 and h < 0 and h <= hp):
+                out.append({"text": f"{tf} MACD momentum supports the {word}.", "against": False})
+        dv = a.get("div")
+        if dv:
+            if (s == 1 and dv["type"] == "bearish") or (s == -1 and dv["type"] == "bullish"):
+                out.append({"text": f"{dv['type'].capitalize()} RSI divergence on {tf}: momentum is fading against the {word}.", "against": True})
+            else:
+                out.append({"text": f"{dv['type'].capitalize()} RSI divergence on {tf} supports the {word}.", "against": False})
+    a = per.get("setup")
+    if a and a.get("vol_ratio") is not None:
+        vr = a["vol_ratio"]
+        if vr < 0.7:
+            out.append({"text": f"Volume on {tfl(a['tf'])} is {vr:.1f}x its recent average: the move is not volume-confirmed.", "against": True})
+        elif vr > 1.5:
+            out.append({"text": f"Volume on {tfl(a['tf'])} is {vr:.1f}x its recent average: strong participation.", "against": False})
+    elif kind == "forex":
+        out.append({"text": "Forex has no real volume in this data, so volume cannot be checked.", "against": False})
+    if a and a["atr_ratio"] > 1.4:
+        out.append({"text": f"Volatility on {tfl(a['tf'])} is {a['atr_ratio']:.1f}x normal.", "against": True})
+    sess = ict.get("session", {}).get("name", "")
+    if sess.startswith("Asian") and style != "swing":
+        out.append({"text": "Asian session: thin liquidity, moves here are often faded.", "against": True})
+    return out
+
+
+def make_setup(name, style, per, ict, dec, mods, kind, per_all=None, news=None):
     cfg = STYLES[style]
     setup, bias, trig, ctx = per["setup"], per["bias"], per.get("trigger"), per.get("ctx")
     fmt = lambda x: A.fmt(x, dec)
@@ -697,39 +843,75 @@ def make_setup(name, style, per, ict, dec, mods, kind, per_all=None):
             refine = {"type": z["type"], "tf": "5m", "low": z["low"], "high": z["high"]}
     status = ("READY" if trig_ok else "IN ZONE") if in_zone else "WAIT"
 
-    conf = 5 + 20 * max(align, -1.0)
-    conf += min(24.0, poi["score"] * 3.0)
+    fx, missing = [], []
+
+    def add(key, label, pts, detail=""):
+        fx.append({"key": key, "label": label, "pts": int(round(pts)), "detail": detail})
+
+    conf_txt = ", ".join(poi["confluence"]) if poi["confluence"] else "none"
+    word = "long" if s == 1 else "short"
+    add("base", "Base", 5)
+    add("align", "Top-down alignment", 20 * max(align, -1.0),
+        f"{align * 100:+.0f}% weighted agreement of {', '.join(tfl(t) for t in per_all)} with the {word}")
+    add("poi", "Point of interest", min(24.0, poi["score"] * 3.0),
+        f"{poi['type']} on {poi['tf']} ({poi['note']}); confluence: {conf_txt}; score {poi['score']:.1f}")
     if trig_ok:
-        conf += 10
+        add("trigger", "Lower-timeframe confirmation", 10, trig_txt)
+    else:
+        missing.append({"label": f"a {tfl(cfg['trigger'])} (or 5m) CHoCH / BOS in the {word} direction", "pts": 10})
     if sweeps:
-        conf += 8
+        add("sweep", "Liquidity sweep", 8, f"{'sell' if s == 1 else 'buy'}-side liquidity taken at {fmt(sweeps[-1]['level'])}")
+    else:
+        missing.append({"label": f"a sweep of {'sell' if s == 1 else 'buy'}-side liquidity before the entry", "pts": 8})
     if fib:
         good_loc = (s == 1 and fib["zone"] == "discount") or (s == -1 and fib["zone"] == "premium")
         bad_loc = (s == 1 and fib["zone"] == "premium") or (s == -1 and fib["zone"] == "discount")
-        conf += 6 if good_loc else (-6 if bad_loc else 0)
+        if good_loc:
+            add("loc", "Location", 6, f"{word.capitalize()} from {fib['zone']} of the {tfl(setup['tf'])} range")
+        elif bad_loc:
+            add("loc", "Location", -6, f"{word.capitalize()} from {fib['zone']} of the {tfl(setup['tf'])} range (wrong side)")
+            missing.append({"label": f"price trading into {'discount' if s == 1 else 'premium'} of the range", "pts": 12})
     if tp1["rr"] >= 2 or tp2["rr"] >= 3:
-        conf += 8
+        add("rr", "Reward to risk", 8, f"TP1 {tp1['rr']:.1f}R, TP2 {tp2['rr']:.1f}R")
+    else:
+        missing.append({"label": "a structural target at 2R or better", "pts": 8})
     if tp1["rr"] < 1:
-        conf -= 10
+        add("rr_low", "Reward to risk below 1", -10, f"first target only {tp1['rr']:.1f}R")
     against = []
     for t in ("1M", "1w", "1d", cfg["ctx"]):
         if t not in against and t != cfg["bias"] and t in per_all and per_all[t]["trend"] == -s:
             against.append(t)
     if against:
-        conf -= min(12, 4 * len(against))
+        add("htf", "Against higher timeframes", -min(12, 4 * len(against)),
+            f"{', '.join(tfl(t) for t in against)} {'trends point' if len(against) > 1 else 'trend points'} the other way")
         notes.append(f"Against the {', '.join(tfl(t) for t in against)} trend: reduce size or take profit early.")
+        missing.append({"label": f"{', '.join(tfl(t) for t in against)} structure turning {'up' if s == 1 else 'down'} (CHoCH)", "pts": min(12, 4 * len(against))})
     else:
         htf = [t for t in ("1M", "1w", "1d") if t in per_all]
         if len(htf) >= 2 and all(per_all[t]["trend"] == s for t in htf):
             notes.append(f"{', '.join(tfl(t) for t in htf)} structure all agree with the {'long' if s == 1 else 'short'} bias.")
     if range_mode:
-        conf -= 10
+        add("range", "Ranging higher timeframe", -10, "no clear trend: only the edges of the range are tradable")
         notes.append("Higher timeframe is ranging: trade the edges of the range only.")
     if ict.get("session", {}).get("kill") and style != "swing":
-        conf += 4
+        add("session", "Kill zone", 4, ict["session"]["name"])
     if ict.get("session", {}).get("closed"):
         notes.append("Forex market is closed (weekend): data is stale, levels are for planning only.")
-    conf = int(max(0, min(100, round(conf))))
+    conf_raw = int(max(0, min(100, sum(f["pts"] for f in fx))))
+    nfx = news_effect(name, kind, news)
+    if nfx and nfx["pts"]:
+        w = nfx["worst"]
+        add("news", "News risk", -nfx["pts"],
+            f"{w['currency']} {w['title']} {_when(w['mins'])} ({w['impact']} impact)")
+        notes.append(f"News: {w['currency']} {w['title']} {_when(w['mins'])}. "
+                     + ("Do not open a position now: wait until the release has passed and structure has settled."
+                        if nfx["hold"] else "Expect spreads and volatility to rise: consider waiting."))
+        missing.append({"label": f"the {w['currency']} {w['title']} release to pass (about 45 min after it)", "pts": nfx["pts"]})
+    conf = int(max(0, min(100, sum(f["pts"] for f in fx))))
+    status0 = status
+    if nfx and nfx["hold"] and status in ("READY", "IN ZONE"):
+        status = "NEWS HOLD"
+    obs = observations(s, per, per_all, style, kind, ict)
 
     stop_atr = abs(entry - sl) / a
     vol = "high" if setup["atr_ratio"] > 1.4 else ("low" if setup["atr_ratio"] < 0.7 else "normal")
@@ -745,16 +927,15 @@ def make_setup(name, style, per, ict, dec, mods, kind, per_all=None):
     res["risk"] = {"stop_pct": abs(entry - sl) / entry * 100, "stop_atr": stop_atr, "atr_pct": setup["atr_pct"],
                    "vol": vol, "rr1": tp1["rr"], "rr2": tp2["rr"], "notes": risk_notes}
 
-    conf_txt = ", ".join(poi["confluence"]) if poi["confluence"] else "none"
     notes.insert(0, f"{_dirword(s)} bias from {reason}; alignment {abs(align) * 100:.0f}% across {', '.join(tfl(t) for t in per_all)}.")
     notes.append(f"POI: {poi['type']} on {poi['tf']} ({poi['note']}), confluence with: {conf_txt}.")
     if sweeps:
         notes.append(f"Liquidity {'sell-side' if s == 1 else 'buy-side'} was just swept at {fmt(sweeps[-1]['level'])}: supports a reversal entry.")
     if fib:
         notes.append(f"Price is in {fib['zone']} of the {tfl(setup['tf'])} range (eq {fmt(fib['eq'])}); OTE zone {fmt(fib['ote'][0])} - {fmt(fib['ote'][1])}.")
-    if status == "WAIT":
+    if status0 == "WAIT":
         notes.append(f"Wait for price to reach the zone ({poi['dist'] / a:.1f} ATR away), then look for a {tfl(cfg['trigger'])} CHoCH or BOS as confirmation.")
-    elif status == "IN ZONE":
+    elif status0 == "IN ZONE":
         notes.append(f"Price is inside the zone: wait for a {tfl(cfg['trigger'])} {'bullish' if s == 1 else 'bearish'} CHoCH/BOS before entering.")
     else:
         notes.append(f"Confirmation present ({trig_txt}).")
@@ -770,13 +951,15 @@ def make_setup(name, style, per, ict, dec, mods, kind, per_all=None):
                 "confluence": poi["confluence"], "score": round(poi["score"], 1), "dist_atr": poi["dist"] / a},
         "alt_pois": [{"type": p["type"], "tf": p["tf"], "low": p["low"], "high": p["high"]} for p in pois[1:]],
         "entry": entry, "stop": sl, "tp1": tp1, "tp2": tp2, "notes": notes, "refine": refine,
+        "factors": fx, "missing": missing, "conf_raw": conf_raw, "news": nfx, "observations": obs,
+        "zone": {"low": zl, "high": zh},
         "strings": {"entry": f"{fmt(zl)} - {fmt(zh)}", "stop": fmt(sl),
                     "tp1": fmt(tp1["price"]), "tp2": fmt(tp2["price"])},
     })
     return res
 
 
-def build(name, kind, style, tfs, dec=None, mods=None, ts=None):
+def build(name, kind, style, tfs, dec=None, mods=None, ts=None, news=None):
     mods = mods or {}
     cfg = STYLES[style]
     per_all = {}
@@ -789,7 +972,7 @@ def build(name, kind, style, tfs, dec=None, mods=None, ts=None):
     if not per["setup"] or not per["bias"]:
         return {"name": name, "kind": kind, "style": style, "error": "not enough price history for this style"}
     ict = ict_context(tfs, kind, ts)
-    setup = make_setup(name, style, per, ict, dec, mods, kind, per_all)
+    setup = make_setup(name, style, per, ict, dec, mods, kind, per_all, news)
     px = per["setup"]["price"]
     return {"name": name, "kind": kind, "style": style, "price": px, "dec": dec, "ict": ict, "setup": setup,
             "_per": per, "_all": per_all, "confidence": setup["confidence"]}
@@ -840,11 +1023,64 @@ def _zones_txt(zs):
     return ", ".join(f"{z['name']} {z['zone']} ({z['state']})" for z in zs) or "none"
 
 
+def xray_text(res, label):
+    """Trade X-Ray: every point of the confidence score, what holds it back and what would raise it."""
+    if res.get("error"):
+        return f"{label}: {res['error']}."
+    s, dec = res["setup"], res["dec"]
+    fmt = lambda x: A.fmt(x, dec)
+    cfg = STYLES[res["style"]]
+    head = f"TRADE X-RAY - {label}, {cfg['label']}"
+    if s["direction"] == "none" or not s.get("factors"):
+        return head + "\n\nNo scored setup right now.\n" + "\n".join("- " + n for n in s["notes"])
+    total = sum(f["pts"] for f in s["factors"])
+    L = [head, f"{s['direction'].upper()} - {s['status']} - confidence {s['confidence']} ({s.get('conf_label', '-')})"]
+    if s.get("news") and s["news"]["pts"]:
+        L.append(f"Setup quality {s['conf_raw']}, minus {s['news']['pts']} for upcoming news.")
+    L += ["", "HOW THE SCORE IS BUILT"]
+    for f in sorted(s["factors"], key=lambda x: -x["pts"]):
+        L.append(f"{f['pts']:+d}  {f['label']}")
+        if f["detail"]:
+            L.append(f"      {f['detail']}")
+    cap = ""
+    if total != s["confidence"]:
+        cap = f" (limited to the 0-100 range)"
+    L.append(f"= {s['confidence']}{cap}")
+    neg = [f for f in s["factors"] if f["pts"] < 0]
+    against = [o for o in s.get("observations", []) if o["against"]]
+    L += ["", "WHAT IS HOLDING IT BACK"]
+    if not neg and not s["missing"] and not against:
+        L.append("Nothing significant: all scored checks are in place.")
+    for f in neg:
+        L.append(f"- {f['label']} ({f['pts']:+d}): {f['detail']}")
+    for m in s["missing"]:
+        if not any(f["label"].startswith("News") for f in neg) or "release" not in m["label"]:
+            L.append(f"- Not there yet: {m['label']} (+{m['pts']} if it happens)")
+    if against:
+        L.append("Context against the trade (not in the score yet):")
+        L += ["- " + o["text"] for o in against]
+    sup = [o for o in s.get("observations", []) if not o["against"]]
+    if sup:
+        L += ["", "CONTEXT IN FAVOUR (not in the score yet)"] + ["- " + o["text"] for o in sup]
+    L += ["", "WHAT WOULD RAISE IT"]
+    ups = sorted(s["missing"], key=lambda m: -m["pts"])
+    if ups:
+        L += [f"- {m['label']}: up to +{m['pts']}" for m in ups]
+        best = min(100, s["confidence"] + sum(m["pts"] for m in ups))
+        L.append(f"If all of that lined up the score would be about {best}.")
+    else:
+        L.append("- Nothing missing: the setup already has every scored ingredient.")
+    L += ["", "Scores are a rule-based checklist, not a probability. Live results are tracked in the setup journal."]
+    return "\n".join(L)
+
+
 def report_text(res, label, focus=None, mods=None):
     """Plain-text report for the chat and the Setups screen."""
     mods = mods or {}
     if res.get("error"):
         return f"{label}: {res['error']}."
+    if focus == "xray":
+        return xray_text(res, label)
     per, setup, ict, style = res["_per"], res["setup"], res["ict"], res["style"]
     cfg = STYLES[style]
     dec = res["dec"]
@@ -974,7 +1210,9 @@ def report_text(res, label, focus=None, mods=None):
         P += setup["notes"]
     else:
         p = setup["poi"]
-        P.append(f"{setup['direction'].upper()} - {setup['status']} - confidence {setup['confidence']} ({setup['conf_label']})")
+        nfx = setup.get("news")
+        adj = f", setup quality {setup['conf_raw']} minus {nfx['pts']} for news" if nfx and nfx["pts"] else ""
+        P.append(f"{setup['direction'].upper()} - {setup['status']} - confidence {setup['confidence']} ({setup['conf_label']}){adj}")
         P.append(f"POI: {p['type']} {p['tf']} {fmt(p['low'])} - {fmt(p['high'])} (score {p['score']}; confluence: {', '.join(p['confluence']) or 'none'})")
         for ap in setup.get("alt_pois", [])[:2]:
             P.append(f"Alternative: {ap['type']} {ap['tf']} {fmt(ap['low'])} - {fmt(ap['high'])}")
@@ -1027,6 +1265,12 @@ def public(res, label):
             m = tf_summary(allp[t], fmt)
             tag = ", ".join(roles.get(t, [])) or ("micro entry" if t == "5m" else "")
             out["tf"].append({**m, "role": tag})
+    nfx = s.get("news")
+    out["conf_raw"] = s.get("conf_raw", s["confidence"])
+    if nfx and nfx["pts"]:
+        w = nfx["worst"]
+        out["news"] = {"pts": -nfx["pts"], "hold": nfx["hold"], "line": f"{w['currency']} {w['title']} {_when(w['mins'])}",
+                       "events": [{"title": e["title"], "currency": e["currency"], "mins": e["mins"], "impact": e["impact"]} for e in nfx["events"]]}
     rf = s.get("refine")
     if rf:
         out["refine"] = f"{tfl('5m')} {rf['type']} {fmt(rf['low'])} - {fmt(rf['high'])}"

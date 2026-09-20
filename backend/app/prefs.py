@@ -26,7 +26,7 @@ def defaults():
                      "impact": "medium" if imp == "medium" else "high",
                      "currencies": [c for c in cur if c in CURRENCIES] or ["USD", "EUR", "GBP", "JPY"],
                      "leads": sorted({x for x in leads if x in LEADS} or {60, 15, 0}, reverse=True)},
-        "analyst": {"style": "intraday", "modules": {m: True for m in MODULES}},
+        "analyst": {"style": "intraday", "modules": {m: True for m in MODULES}, "news_scoring": True, "journal": True},
     }
 
 
@@ -92,6 +92,9 @@ def _clean(p):
             o["style"] = an["style"]
         if isinstance(an.get("modules"), dict):
             o["modules"] = {k: bool(v) for k, v in an["modules"].items() if k in MODULES}
+        for k in ("news_scoring", "journal"):
+            if isinstance(an.get(k), bool):
+                o[k] = an[k]
         out["analyst"] = o
     return out
 

@@ -10,7 +10,7 @@ class MarketsPage extends StatelessWidget {
   const MarketsPage({super.key});
   @override
   Widget build(BuildContext context) => DefaultTabController(
-        length: 5,
+        length: 6,
         child: Scaffold(
           appBar: AppBar(
             title: const Text('Markets'),
@@ -18,6 +18,7 @@ class MarketsPage extends StatelessWidget {
               Tab(text: 'Crypto'),
               Tab(text: 'Forex and gold'),
               Tab(text: 'Setups'),
+              Tab(text: 'Journal'),
               Tab(text: 'Calendar'),
               Tab(text: 'News'),
             ]),
@@ -26,6 +27,7 @@ class MarketsPage extends StatelessWidget {
             MarketView('crypto'),
             MarketView('forex'),
             SetupsView(),
+            JournalView(),
             CalendarView(),
             NewsView(),
           ]),
@@ -292,7 +294,8 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
         child: Text(text, style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: c)),
       );
 
-  Color _statusColor(Pal p, String s) => s == 'READY' ? p.gain : (s == 'IN ZONE' ? p.warn : p.muted);
+  Color _statusColor(Pal p, String s) =>
+      s == 'READY' ? p.gain : (s == 'IN ZONE' ? p.warn : (s == 'NEWS HOLD' ? p.loss : p.muted));
 
   Widget _card(Pal p, Map<String, dynamic> r) {
     final dir = '${r['direction']}';
@@ -342,11 +345,27 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
               padding: const EdgeInsets.only(top: 2),
               child: Text('Micro entry: ${r['refine']}', style: numStyle.copyWith(fontSize: 12.5, color: p.accent)),
             ),
+          if (r['news'] != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                '${(r['news'] as Map)['hold'] == true ? 'NEWS HOLD: ' : 'News: '}${(r['news'] as Map)['line']} (${(r['news'] as Map)['pts']} confidence)',
+                style: TextStyle(color: p.warn, fontSize: 12.5, fontWeight: FontWeight.w700),
+              ),
+            ),
           const SizedBox(height: 8),
           Text('STRUCTURE BY TIMEFRAME  (BOS / CHoCH / OB / FVG)',
               style: TextStyle(color: p.muted, fontSize: 10.5, letterSpacing: 0.6, fontWeight: FontWeight.w600)),
           const SizedBox(height: 4),
           for (final t in tfs) _tfRow(p, t as Map<String, dynamic>),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: () => _detail(r, focus: 'xray'),
+              icon: const Icon(Icons.troubleshoot, size: 18),
+              label: const Text('Why this score? (Trade X-Ray)'),
+            ),
+          ),
         ]),
       ),
     );
@@ -398,7 +417,7 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
     );
   }
 
-  void _detail(Map<String, dynamic> r) {
+  void _detail(Map<String, dynamic> r, {String focus = ''}) {
     final p = context.pal;
     showModalBottomSheet(
       context: context,
@@ -407,7 +426,7 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
       builder: (_) => FractionallySizedBox(
         heightFactor: 0.92,
-        child: _DetailSheet(name: '${r['name']}', label: '${r['label']}', style: style),
+        child: _DetailSheet(name: '${r['name']}', label: '${r['label']}', style: style, initialFocus: focus),
       ),
     );
   }
@@ -486,8 +505,8 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
 }
 
 class _DetailSheet extends StatefulWidget {
-  final String name, label, style;
-  const _DetailSheet({required this.name, required this.label, required this.style});
+  final String name, label, style, initialFocus;
+  const _DetailSheet({required this.name, required this.label, required this.style, this.initialFocus = ''});
   @override
   State<_DetailSheet> createState() => _DetailSheetState();
 }
@@ -495,6 +514,7 @@ class _DetailSheet extends StatefulWidget {
 class _DetailSheetState extends State<_DetailSheet> {
   static const focuses = {
     '': 'Full report',
+    'xray': 'Trade X-Ray',
     'topdown': 'Top-down (all TFs)',
     'structure': 'BOS / CHoCH',
     'ob': 'Order blocks',
@@ -515,6 +535,7 @@ class _DetailSheetState extends State<_DetailSheet> {
   @override
   void initState() {
     super.initState();
+    focus = widget.initialFocus;
     _load();
   }
 
@@ -574,6 +595,239 @@ class _DetailSheetState extends State<_DetailSheet> {
                     )),
         ),
       ]),
+    );
+  }
+}
+
+// ------------------------------------------------------------------ journal
+
+class JournalView extends StatefulWidget {
+  const JournalView({super.key});
+  @override
+  State<JournalView> createState() => _JournalViewState();
+}
+
+class _JournalViewState extends State<JournalView> with AutomaticKeepAliveClientMixin {
+  String style = '';
+  String scope = '';
+  Map<String, dynamic>? stats;
+  List items = [];
+  bool loading = false;
+  String? err;
+  int req = 0;
+
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  void initState() {
+    super.initState();
+    if (Api.ready) {
+      _load();
+    } else {
+      err = 'Enter your API token in Settings to connect.';
+    }
+  }
+
+  Future<void> _load() async {
+    final my = ++req;
+    setState(() {
+      loading = true;
+      err = null;
+    });
+    try {
+      final s = await Api.get('/api/journal/stats', {'days': '90', if (style.isNotEmpty) 'style': style}) as Map<String, dynamic>;
+      final l = await Api.get('/api/journal', {
+        'limit': '60',
+        if (style.isNotEmpty) 'style': style,
+        if (scope.isNotEmpty) 'state': scope,
+      }) as Map<String, dynamic>;
+      if (mounted && my == req) {
+        setState(() {
+          stats = s;
+          items = l['items'] as List;
+        });
+      }
+    } catch (e) {
+      if (mounted && my == req) setState(() => err = '$e');
+    }
+    if (mounted && my == req) setState(() => loading = false);
+  }
+
+  String _pct(dynamic v) => v == null ? '-' : '${(v as num).toStringAsFixed(0)}%';
+  String _r(dynamic v) => v == null ? '-' : '${(v as num) >= 0 ? '+' : ''}${(v as num).toStringAsFixed(2)}R';
+
+  String _ago(num ts) {
+    final m = ((DateTime.now().millisecondsSinceEpoch / 1000 - ts) / 60).round();
+    if (m < 60) return '${m < 1 ? 1 : m} min ago';
+    if (m < 1440) return '${m ~/ 60} h ago';
+    return '${m ~/ 1440} d ago';
+  }
+
+  (String, Color) _outcome(Pal p, Map<String, dynamic> e) {
+    final res = e['result'];
+    switch (res) {
+      case 'win':
+        return ('TP1 HIT', p.gain);
+      case 'loss':
+        return ('STOPPED', p.loss);
+      case 'timeout':
+        return ('TIMED OUT', p.muted);
+      case 'missed':
+        return ('MISSED', p.muted);
+      case 'expired':
+        return ('EXPIRED', p.muted);
+      case 'invalid':
+        return ('INVALID', p.muted);
+      case 'superseded':
+        return ('REPLACED', p.muted);
+    }
+    return e['state'] == 'active' ? ('OPEN', p.warn) : ('WAITING', p.muted);
+  }
+
+  Widget _chip(Pal p, String text, Color c) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(color: Color.lerp(p.surface, c, 0.22), borderRadius: BorderRadius.circular(6)),
+        child: Text(text, style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: c)),
+      );
+
+  Widget _statsPanel(Pal p) {
+    final s = stats;
+    if (s == null) return const SizedBox.shrink();
+    final n = (s['n'] as num).toInt();
+    final byConf = ((s['by_conf'] as List?) ?? []).where((b) => (b['n'] as num) > 0).toList();
+    return Panel(
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('LAST ${s['days']} DAYS', style: TextStyle(color: p.muted, fontSize: 11, letterSpacing: 1)),
+        const SizedBox(height: 6),
+        Row(children: [
+          Expanded(child: _big(p, _pct(s['win_rate']), 'TP1 before stop')),
+          Expanded(child: _big(p, '$n', 'resolved')),
+          Expanded(child: _big(p, _r(s['avg_r']), 'average')),
+        ]),
+        const SizedBox(height: 8),
+        Text('Logged ${s['logged']}  -  open ${s['open']}  -  filled ${s['filled']}  -  never filled ${s['unfilled']}',
+            style: TextStyle(color: p.muted, fontSize: 12)),
+        if (byConf.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          for (final b in byConf)
+            Text('${b['label']}: ${b['n']} resolved, ${_pct(b['win_rate'])} TP1, ${_r(b['avg_r'])}',
+                style: numStyle.copyWith(fontSize: 12.5)),
+        ],
+        if (n < 20)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text('Small sample: results are noisy until there are a few dozen resolved setups.',
+                style: TextStyle(color: p.warn, fontSize: 12)),
+          ),
+      ]),
+    );
+  }
+
+  Widget _big(Pal p, String v, String label) => Column(children: [
+        Text(v, style: numStyle.copyWith(fontSize: 22, fontWeight: FontWeight.w800)),
+        Text(label, style: TextStyle(color: p.muted, fontSize: 11.5)),
+      ]);
+
+  Widget _row(Pal p, Map<String, dynamic> e) {
+    final (label, col) = _outcome(p, e);
+    final long = e['dir'] == 'long';
+    final res = e['r'];
+    return Panel(
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Expanded(
+            child: Text('${e['name']}  ${styleLabels['${e['style']}'] ?? e['style']}',
+                style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15)),
+          ),
+          Text(_ago((e['ts'] as num)), style: TextStyle(color: p.muted, fontSize: 12)),
+        ]),
+        const SizedBox(height: 6),
+        Row(children: [
+          Container(
+            margin: const EdgeInsets.only(right: 6),
+            child: _chip(p, '${e['dir']}'.toUpperCase(), long ? p.gain : p.loss),
+          ),
+          _chip(p, label, col),
+          const Spacer(),
+          Text('conf ${e['conf_raw']}${(e['news_pts'] as num) > 0 ? ' (news -${e['news_pts']})' : ''}',
+              style: numStyle.copyWith(fontSize: 12.5, color: p.muted)),
+        ]),
+        const SizedBox(height: 6),
+        Text('${e['poi']}  ${e['zone']}', style: numStyle.copyWith(fontSize: 12.5)),
+        Text('Stop ${e['stop']}   TP1 ${e['tp1']} (${e['rr1']}R)', style: numStyle.copyWith(fontSize: 12.5)),
+        if (res != null)
+          Text('Result ${_r(res)}${e['mfe'] != null ? '   best move ${_r(e['mfe'])}' : ''}',
+              style: numStyle.copyWith(fontSize: 12.5, fontWeight: FontWeight.w700, color: col)),
+      ]),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    final p = context.pal;
+    return RefreshIndicator(
+      onRefresh: _load,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(12),
+        children: [
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(value: '', label: Text('All')),
+              ButtonSegment(value: 'scalp', label: Text('Scalp')),
+              ButtonSegment(value: 'intraday', label: Text('Intraday')),
+              ButtonSegment(value: 'swing', label: Text('Swing')),
+            ],
+            selected: {style},
+            onSelectionChanged: (s) {
+              style = s.first;
+              _load();
+            },
+          ),
+          const SizedBox(height: 8),
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(value: '', label: Text('All')),
+              ButtonSegment(value: 'open', label: Text('Open')),
+              ButtonSegment(value: 'closed', label: Text('Closed')),
+            ],
+            selected: {scope},
+            onSelectionChanged: (s) {
+              scope = s.first;
+              _load();
+            },
+          ),
+          const SizedBox(height: 8),
+          if (loading) const LinearProgressIndicator(),
+          if (err != null)
+            Panel(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(err!, style: TextStyle(color: p.loss)),
+                TextButton(onPressed: _load, child: const Text('Retry')),
+              ]),
+            ),
+          _statsPanel(p),
+          if (items.isEmpty && !loading && err == null)
+            Padding(
+              padding: const EdgeInsets.all(20),
+              child: Text(
+                'Nothing logged yet. Every 5 minutes the server records new setups and follows price to see whether '
+                'each one reached TP1 or its stop. Results appear after a few hours.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: p.muted, height: 1.4),
+              ),
+            ),
+          for (final e in items) _row(p, e as Map<String, dynamic>),
+          const SizedBox(height: 8),
+          Text(
+            'Rules: a setup fills when price trades through its entry. If stop and TP1 sit in one candle the stop wins. '
+            'Fees and slippage are ignored. Live forward results, not a backtest.',
+            style: TextStyle(color: p.muted, fontSize: 12, height: 1.4),
+          ),
+        ],
+      ),
     );
   }
 }

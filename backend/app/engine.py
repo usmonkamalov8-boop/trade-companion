@@ -2,7 +2,7 @@
 briefings and answers chat questions. No paid API, no LLM, no keys."""
 import asyncio, re, time
 from datetime import datetime, timezone
-from . import analytics as A, bot, market, prefs, strategy, config as C
+from . import analytics as A, bot, journal, market, prefs, strategy, config as C
 
 _scan_cache = {}
 DISCLAIMER = "Rule-based analysis of live data. Not financial advice."
@@ -428,22 +428,92 @@ def _focus_of(ql):
     return None
 
 
+async def _news():
+    """Upcoming and just-released calendar events for news-risk scoring (None = scoring off or feed down)."""
+    if not prefs.get()["analyst"].get("news_scoring", True):
+        return None
+    try:
+        from . import econ
+        rows = await econ.upcoming(hours=3, impact="medium", past_h=1)
+        if not rows and econ.diag()["count"] == 0:
+            return None
+    except Exception:
+        return None
+    return [{"currency": r["currency"], "impact": r["impact"], "title": r["title"], "mins": r["mins"]} for r in rows]
+
+
 async def analyze(name, style):
     mods = _mods()
-    key = (name, style, tuple(sorted(mods.items())))
+    news_on = prefs.get()["analyst"].get("news_scoring", True)
+    key = (name, style, tuple(sorted(mods.items())), news_on)
     hit = _an_cache.get(key)
     if hit and time.time() - hit[0] < 60:
         return hit[1]
     kind = "crypto" if name in C.CRYPTO else "forex"
-    cfg = strategy.STYLES[style]
-    tfs = await market.tfs(name, kind, list(strategy.ALL_TFS))
+    tfs, news = await asyncio.gather(market.tfs(name, kind, list(strategy.ALL_TFS)), _news())
     dec = None if kind == "crypto" else C.FOREX[name][1]
-    res = await asyncio.to_thread(strategy.build, name, kind, style, tfs, dec, mods, time.time())
+    res = await asyncio.to_thread(strategy.build, name, kind, style, tfs, dec, mods, time.time(), news)
+    res["news_active"] = news is not None
     _an_cache[key] = (time.time(), res)
     if len(_an_cache) > 200:
         for k in sorted(_an_cache, key=lambda k: _an_cache[k][0])[:50]:
             _an_cache.pop(k, None)
     return res
+
+
+def _journal_line(res):
+    if res.get("error") or not prefs.get()["analyst"].get("journal", True):
+        return ""
+    s = res["setup"]
+    if s["direction"] == "none" or not s.get("poi"):
+        return ""
+    try:
+        return journal.similar_line(res["style"], s["poi"]["type"], s["direction"], res["name"])
+    except Exception:
+        return ""
+
+
+async def xray_report(name, style=None):
+    style = style if style in strategy.STYLES else _default_style()
+    res = await analyze(name, style)
+    text = strategy.xray_text(res, f"{name} ({C.LABELS.get(name, name)})")
+    if res.get("error"):
+        return text
+    extra = []
+    if not res.get("news_active"):
+        extra.append("News scoring is not active (switched off in Settings, or the calendar feed is unavailable).")
+    jl = _journal_line(res)
+    if jl:
+        extra.append(jl)
+    tail = "\n\nScores are a rule-based checklist"
+    block = ("\n\n" + "\n".join(extra)) if extra else ""
+    return text.replace(tail, block + tail) if tail in text else text + block
+
+
+def journal_text(style=None, name=None):
+    st = journal.stats(90, style if style in strategy.STYLES else None, name)
+    who = f"{name} " if name else ""
+    L = [f"SETUP JOURNAL - {who}{strategy.STYLES[style]['label'] + ' ' if style in strategy.STYLES else ''}last {st['days']} days", ""]
+    if not st["logged"]:
+        L.append("The journal is empty. Every 5 minutes the server logs new setups and follows price to see whether "
+                 "each one reached TP1 or its stop. Results start to appear after a few hours.")
+        return "\n".join(L)
+    L.append(f"Logged {st['logged']} setups: {st['open']} still open, {st['filled']} filled, {st['unfilled']} never filled.")
+    if st["n"]:
+        L.append(f"Filled and resolved: {st['n']}. TP1 before the stop: {st['wins']} ({st['win_rate']:.0f}%), "
+                 f"stopped out: {st['losses']}. Average result {st['avg_r']:+.2f}R (before fees).")
+    else:
+        L.append("No setup has resolved yet.")
+    rows = [b for b in st["by_conf"] if b["n"]]
+    if rows:
+        L += ["", "By confidence (setup quality before news):"]
+        L += [f"- {b['label']}: {b['n']} resolved, {b['win_rate']:.0f}% TP1, {b['avg_r']:+.2f}R" for b in rows]
+    rows = [b for b in st["by_poi"] if b["n"]]
+    if rows:
+        L += ["", "By zone type:"] + [f"- {b['label']}: {b['n']} resolved, {b['win_rate']:.0f}% TP1" for b in rows]
+    L += ["", "Rules: a fill needs price through the entry; if stop and TP1 sit in one candle the stop wins; "
+          "fees and slippage are ignored. Small samples are noisy.", DISCLAIMER]
+    return "\n".join(L)
 
 
 def _default_style():
@@ -464,6 +534,9 @@ async def strategy_report(name, style=None, focus=None):
                 rel = "matches" if d == want else ("goes against" if d != "none" else "has no clear")
                 extra.append(f"Your position: {_pos_line(p, None)} - it {rel} the {style} setup direction.")
     if not focus:
+        jl = _journal_line(res)
+        if jl:
+            extra.append(jl)
         try:
             rows = await scan("crypto" if name in C.CRYPTO else "forex")
             r = next((x for x in rows if x["name"] == name), None)
@@ -582,6 +655,21 @@ async def answer(question, history=None):
         return await forex_briefing()
     style = _style_of(ql)
     focus = _focus_of(ql)
+    if _has(ql, "journal") or (_has(ql, "win rate", "winrate", "track record", "accuracy", "statistics", "stats")
+                               and _has(ql, "setup", "analyst", "signals", "confidence", "ai")):
+        return journal_text(style, assets[0] if assets else None)
+    xr = _has(ql, "x-ray", "xray", "breakdown") or (
+        _has(ql, "why", "explain", "how come") and _has(ql, "confiden", "score", "rating", "setup", "trade"))
+    if xr:
+        if not assets and history:
+            for m in reversed(history[:-1]):
+                if m["role"] == "user":
+                    assets = find_assets(m["content"])
+                    if assets:
+                        break
+        if assets:
+            return await xray_report(assets[0], style)
+        return "Which asset? For example: \"Trade X-ray BTC\" or \"Why is gold confidence low?\""
     ops = _has(ql, "profile", "hier", "halt", "status", "pnl", "balance", "settings")
     sw = _has(ql, "setup", "trade idea", "entry", "stop loss", "take profit", "risk reward", "top-down", "top down",
               "strategy", "poi", "zone", "trade plan", "smc", "ict")

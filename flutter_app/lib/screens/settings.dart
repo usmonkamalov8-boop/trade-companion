@@ -575,6 +575,28 @@ class _AnalystPageState extends State<AnalystPage> {
                 style: TextStyle(color: p.muted, fontSize: 12.5, height: 1.45),
               ),
             ),
+            const Heading('Safety and tracking'),
+            Panel(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Column(children: [
+                SwitchListTile(
+                  dense: true,
+                  title: const Text('News risk scoring'),
+                  subtitle: Text('Lowers confidence and warns before red-folder releases',
+                      style: TextStyle(color: p.muted, fontSize: 12)),
+                  value: an['news_scoring'] != false,
+                  onChanged: (v) => ServerPrefs.I.update({'analyst': {'news_scoring': v}}),
+                ),
+                SwitchListTile(
+                  dense: true,
+                  title: const Text('Setup journal'),
+                  subtitle: Text('Logs every setup and tracks whether TP1 or the stop was hit',
+                      style: TextStyle(color: p.muted, fontSize: 12)),
+                  value: an['journal'] != false,
+                  onChanged: (v) => ServerPrefs.I.update({'analyst': {'journal': v}}),
+                ),
+              ]),
+            ),
             const Heading('Concepts to include'),
             Panel(
               padding: const EdgeInsets.symmetric(vertical: 4),
@@ -662,6 +684,7 @@ class _DiagnosticsPageState extends State<DiagnosticsPage> {
     final cal = x?['calendar'] as Map<String, dynamic>?;
     final push = x?['push'] as Map<String, dynamic>?;
     final attempts = (cal?['attempts'] as List?) ?? [];
+    final jr = x?['journal'] as Map<String, dynamic>?;
     return Scaffold(
       appBar: AppBar(title: const Text('Diagnostics'), actions: [
         IconButton(onPressed: _load, icon: const Icon(Icons.refresh)),
@@ -707,6 +730,15 @@ class _DiagnosticsPageState extends State<DiagnosticsPage> {
                     style: TextStyle(color: a['ok'] == true ? p.gain : p.loss, fontSize: 12),
                   ),
                 ),
+            ]),
+          ),
+          const Heading('Setup journal'),
+          Panel(
+            child: Column(children: [
+              _kv(p, 'Logged setups', '${jr?['total']}'),
+              _kv(p, 'Open now', '${jr?['open']}'),
+              _kv(p, 'Last scan', _ago((jr?['last_scan'] as num?) ?? 0)),
+              if (jr?['error'] != null) _kv(p, 'Problem', '${jr?['error']}', color: p.loss),
             ]),
           ),
         ],

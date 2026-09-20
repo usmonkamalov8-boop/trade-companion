@@ -3,12 +3,12 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from . import bot, econ, engine, events, market, prefs, push, strategy, watcher, config as C
+from . import bot, econ, engine, events, journal, market, prefs, push, strategy, watcher, config as C
 
 
 @asynccontextmanager
 async def lifespan(app):
-    tasks = [asyncio.create_task(fn()) for fn in (watcher.run, push.run, econ.run)]
+    tasks = [asyncio.create_task(fn()) for fn in (watcher.run, push.run, econ.run, journal.run)]
     yield
     for t in tasks:
         t.cancel()
@@ -195,7 +195,8 @@ async def prefs_set(b: PrefsIn):
 async def diagnostics():
     st = bot.load()
     return {"time": int(time.time()), "service": bot.service_state(), "halted": st["halted"],
-            "events": {"last_id": events.last_id()}, "push": push.info(), "calendar": econ.diag()}
+            "events": {"last_id": events.last_id()}, "push": push.info(), "calendar": econ.diag(),
+            "journal": journal.counts()}
 
 
 # --------------------------------------------------------- economic calendar
@@ -253,9 +254,23 @@ async def analysis(name: str, style: str | None = None, focus: str | None = None
     n, st = _asset(name), _style(style)
     res = await engine.analyze(n, st)
     label = C.LABELS.get(n, n)
-    f = focus if focus in ("topdown", "structure", "ob", "fvg", "sd", "sr", "fib", "trend", "liquidity", "ict", "poi") else None
-    return {"summary": strategy.public(res, label),
-            "text": strategy.report_text(res, f"{n} ({label})", f, prefs.get()["analyst"]["modules"])}
+    f = focus if focus in ("topdown", "structure", "ob", "fvg", "sd", "sr", "fib", "trend", "liquidity", "ict", "poi", "xray") else None
+    text = (await engine.xray_report(n, st)) if f == "xray" else \
+        strategy.report_text(res, f"{n} ({label})", f, prefs.get()["analyst"]["modules"])
+    return {"summary": strategy.public(res, label), "text": text}
+
+
+@api.get("/journal")
+async def journal_list(limit: int = Query(40, ge=1, le=200), state: str | None = None,
+                       style: str | None = None, name: str | None = None):
+    """Logged setups and how they turned out."""
+    return {"items": journal.recent(limit, state if state in ("open", "closed") else None,
+                                    style if style in strategy.STYLES else None, name.upper() if name else None)}
+
+
+@api.get("/journal/stats")
+async def journal_stats(days: int = Query(90, ge=1, le=365), style: str | None = None, name: str | None = None):
+    return journal.stats(days, style if style in strategy.STYLES else None, name.upper() if name else None)
 
 
 @api.get("/setups")
