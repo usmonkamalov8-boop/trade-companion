@@ -52,6 +52,7 @@ class _ChatPageState extends State<ChatPage> {
 
   @override
   Widget build(BuildContext context) {
+    final p = context.pal;
     return Scaffold(
       appBar: AppBar(title: const Text('Assistant'), actions: [
         IconButton(onPressed: () => setState(msgs.clear), icon: const Icon(Icons.delete_outline)),
@@ -73,13 +74,13 @@ class _ChatPageState extends State<ChatPage> {
         ),
         Expanded(
           child: msgs.isEmpty
-              ? const Center(
+              ? Center(
                   child: Padding(
-                    padding: EdgeInsets.all(24),
+                    padding: const EdgeInsets.all(24),
                     child: Text(
                       'Ask about your positions, bot performance, a pair like BTC or EUR/USD, gold, news or sentiment.',
                       textAlign: TextAlign.center,
-                      style: TextStyle(color: C.muted),
+                      style: TextStyle(color: p.muted),
                     ),
                   ),
                 )
@@ -97,9 +98,9 @@ class _ChatPageState extends State<ChatPage> {
                         padding: const EdgeInsets.all(11),
                         constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.9),
                         decoration: BoxDecoration(
-                          color: me ? const Color(0xFF2A2417) : C.surface,
+                          color: me ? p.bubble : p.surface,
                           borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: me ? const Color(0xFF4A3C1B) : C.outline),
+                          border: Border.all(color: me ? p.bubbleBorder : p.outline),
                         ),
                         child: SelectableText(
                           m['content']!.isEmpty ? '...' : m['content']!,

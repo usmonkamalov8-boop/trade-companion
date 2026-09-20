@@ -1,10 +1,20 @@
 import asyncio, secrets, time
+from contextlib import asynccontextmanager
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from . import bot, engine, market, config as C
+from . import bot, econ, engine, events, market, push, watcher, config as C
 
-app = FastAPI(title="Trade Companion API")
+
+@asynccontextmanager
+async def lifespan(app):
+    tasks = [asyncio.create_task(fn()) for fn in (watcher.run, push.run, econ.run)]
+    yield
+    for t in tasks:
+        t.cancel()
+
+
+app = FastAPI(title="Trade Companion API", lifespan=lifespan)
 SH = {"X-Accel-Buffering": "no", "Cache-Control": "no-cache"}
 
 
@@ -65,11 +75,24 @@ async def set_risk(b: RiskIn):
     st = bot.load()
     if b.profile not in st["profiles"]:
         raise HTTPException(404, "unknown profile")
+    prof = st["profiles"][b.profile]
+    old = dict(prof)
     for k in ("enabled", "risk_pct", "max_positions"):
         v = getattr(b, k)
         if v is not None:
-            st["profiles"][b.profile][k] = v
+            prof[k] = v
     bot.save(st)
+    watcher.sync_known()
+    n = b.profile
+    if prof["enabled"] != old["enabled"]:
+        events.add("profile", f"Profile {n} switched {'on' if prof['enabled'] else 'off'}",
+                   "New signals for this profile can be confirmed." if prof["enabled"]
+                   else "Signals for this profile are blocked until it is switched on.",
+                   "success" if prof["enabled"] else "warning")
+    if prof["risk_pct"] != old["risk_pct"]:
+        events.add("risk", f"{n}: risk per trade changed", f"{old['risk_pct']:.1f}% -> {prof['risk_pct']:.1f}%", "info")
+    if prof["max_positions"] != old["max_positions"]:
+        events.add("risk", f"{n}: max positions changed", f"{old['max_positions']} -> {prof['max_positions']}", "info")
     return st["profiles"]
 
 
@@ -79,16 +102,91 @@ async def command(cmd: str):
     if cmd in ("halt", "resume"):
         st["halted"] = cmd == "halt"
         bot.save(st)
+        watcher.sync_known()
+        if st["halted"]:
+            events.add("command", "Bot halted", "Halt pressed in the app. No new entries until Resume.", "warning")
+        else:
+            events.add("command", "Bot resumed", "Resume pressed in the app. New entries are allowed again.", "success")
         return {"ok": True, "halted": st["halted"]}
     if cmd == "closeall":
         st["halted"] = True  # stop new entries first
         bot.save(st)
+        watcher.sync_known()
         try:
             res = await bot.close_all()
         except Exception as e:
+            events.add("command", "Close all failed", str(e)[:200], "error")
             raise HTTPException(502, str(e))
+        n, ok = len(res), sum(1 for r in res if r["ok"])
+        if n == 0:
+            events.add("command", "Close all", "No open positions to close. Bot is halted.", "info")
+        elif ok == n:
+            events.add("command", "Close all", f"Closed {ok} of {n} positions. Bot is halted.", "success")
+        else:
+            bad = ", ".join(r["symbol"] for r in res if not r["ok"])
+            events.add("command", "Close all: some orders failed", f"Closed {ok} of {n}. Failed: {bad}.", "error")
         return {"ok": all(r["ok"] for r in res), "halted": True, "results": res}
     raise HTTPException(404, "unknown command")
+
+
+# ---------------------------------------------------------------- activity
+
+
+@api.get("/events")
+async def events_feed(since: int = Query(0, ge=0), wait: int = Query(0, ge=0, le=25),
+                      limit: int = Query(100, ge=1, le=300)):
+    """Long-poll: returns as soon as an event newer than `since` exists (or after `wait` seconds).
+    since=0 returns the latest 200 events."""
+    if since == 0:
+        rows = events.latest(200)
+        if rows or wait == 0:
+            return {"events": rows, "last_id": events.last_id()}
+    end = time.time() + wait
+    while True:
+        rows = events.since(since, limit)
+        if rows or time.time() >= end:
+            break
+        await asyncio.sleep(0.5)
+    return {"events": rows, "last_id": events.last_id()}
+
+
+@api.post("/events/test")
+async def events_test():
+    events.add("system", "Test notification", "If you can see this pop-up, live notifications work.", "info")
+    return {"ok": True}
+
+
+
+@api.get("/push/info")
+async def push_info():
+    return push.info()
+
+
+@api.post("/push/test")
+async def push_test():
+    try:
+        await push.send_test()
+    except Exception as e:
+        raise HTTPException(502, f"Push failed: {e}")
+    return {"ok": True}
+
+
+# --------------------------------------------------------- economic calendar
+
+
+@api.get("/calendar")
+async def calendar(hours: int = Query(168, ge=1, le=336), impact: str = Query("high"), refresh: int = 0):
+    """Forex Factory calendar: upcoming (and the last 2 h of) high-impact events for the tracked currencies."""
+    if refresh:
+        await econ.refresh(force=True)
+    rows = await econ.upcoming(hours, impact if impact in ("high", "medium") else "high")
+    return {"events": rows, **econ.status()}
+
+
+@api.post("/calendar/test")
+async def calendar_test():
+    econ.test_alert()
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- markets

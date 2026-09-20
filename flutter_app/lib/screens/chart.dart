@@ -33,20 +33,32 @@ class _ChartPageState extends State<ChartPage> {
   @override
   void initState() {
     super.initState();
-    c = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(C.bg);
+    c = WebViewController()..setJavaScriptMode(JavaScriptMode.unrestricted);
+    ThemeController.I.addListener(_load); // re-skin the chart when the palette changes
     _load();
   }
 
+  @override
+  void dispose() {
+    ThemeController.I.removeListener(_load);
+    super.dispose();
+  }
+
+  String _hex(Color col) => '#${(col.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0')}';
+
   void _load() {
+    final pal = ThemeController.I.pal;
+    final bg = _hex(pal.bg);
     final sym = symbols[cur]!;
+    c.setBackgroundColor(pal.bg);
     c.loadHtmlString(
       '<html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head>'
-      '<body style="margin:0;background:#0c1015"><div id="tv" style="height:100vh"></div>'
+      '<body style="margin:0;background:$bg"><div id="tv" style="height:100vh"></div>'
       '<script src="https://s3.tradingview.com/tv.js"></script>'
       '<script>new TradingView.widget({container_id:"tv",autosize:true,symbol:"$sym",interval:"15",'
-      'timezone:"Asia/Dubai",theme:"dark",style:"1",locale:"en",allow_symbol_change:true});</script>'
+      'timezone:"Asia/Dubai",theme:"dark",style:"1",locale:"en",allow_symbol_change:true,'
+      'toolbar_bg:"$bg",backgroundColor:"$bg",'
+      'overrides:{"paneProperties.background":"$bg","paneProperties.backgroundType":"solid"}});</script>'
       '</body></html>',
       baseUrl: 'https://www.tradingview.com/',
     );
@@ -58,6 +70,7 @@ class _ChartPageState extends State<ChartPage> {
           title: DropdownButton<String>(
             value: cur,
             underline: const SizedBox.shrink(),
+            dropdownColor: context.pal.surface,
             items: [for (final k in symbols.keys) DropdownMenuItem(value: k, child: Text(k))],
             onChanged: (v) {
               if (v == null) return;

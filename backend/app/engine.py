@@ -350,10 +350,47 @@ async def ranking_text():
     return "\n".join(L)
 
 
+async def calendar_text():
+    from . import econ
+    rows = await econ.upcoming(hours=96)
+    st = econ.status()
+    c = econ.cfg()
+    if not rows and st["error"]:
+        return "The Forex Factory calendar feed is unreachable right now (" + st["error"] + "). Try again in a few minutes."
+    L = ["RED-FOLDER CALENDAR - next 4 days (" + ", ".join(sorted(c["cur"])) + "; Gold follows USD)", ""]
+    if not rows:
+        L.append("No high-impact events in this window.")
+    for e in rows:
+        d, tzl = econ.local(e["ts"], c["tz"])
+        m = e["mins"]
+        if m < -1:
+            when = "released"
+        elif m <= 0:
+            when = "now"
+        elif m < 60:
+            when = f"in {m} min"
+        elif m < 1440:
+            when = f"in {m // 60}h {m % 60}m"
+        else:
+            when = f"in {m // 1440}d {(m % 1440) // 60}h"
+        L.append(f"{d:%a %d %b %H:%M} ({tzl}) - {e['currency']} {e['title']} - {when}")
+        bits = []
+        if e["forecast"]:
+            bits.append("forecast " + e["forecast"])
+        if e["previous"]:
+            bits.append("previous " + e["previous"])
+        if e["affects"]:
+            bits.append("affects " + e["affects"])
+        if bits:
+            L.append("   " + ", ".join(bits))
+    L += ["", "Alerts are pushed 60 and 15 minutes before each release, and at release time. " + DISCLAIMER]
+    return "\n".join(L)
+
+
 HELP = ("I'm the built-in market analyst (free, rule-based). Ask me things like:\n"
         "- How are my positions?\n- How did the bot do this week?\n- Is the bot halted?\n"
         "- Risk settings for hier and scalp\n- Analyze BTC / SOL / gold / EURUSD\n"
-        "- Crypto briefing / Forex briefing\n- Best setups now\n- News and sentiment")
+        "- Crypto briefing / Forex briefing\n- Best setups now\n- News and sentiment\n- Red-folder calendar")
 
 
 def find_assets(q):
@@ -376,6 +413,8 @@ def _has(q, *words):
 async def answer(question, history=None):
     q = question.strip()
     ql = q.lower()
+    if _has(ql, "calendar", "red folder", "red-folder", "high impact", "high-impact", "economic", "nfp", "cpi", "fomc", "rate decision", "upcoming news"):
+        return await calendar_text()
     assets = find_assets(q)
     if not assets and history and _has(ql, "it", "levels", "support", "resistance", "target", "entry", "why", "stop"):
         for m in reversed(history[:-1]):

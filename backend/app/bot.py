@@ -130,3 +130,10 @@ async def close_all():
             except Exception:
                 pass
     return results
+
+
+async def realized_recent(symbol, minutes=10):
+    rows = await _signed("GET", "/fapi/v1/income", {
+        "incomeType": "REALIZED_PNL", "symbol": symbol,
+        "startTime": int((time.time() - minutes * 60) * 1000), "limit": 100})
+    return round(sum(float(r["income"]) for r in rows), 2)

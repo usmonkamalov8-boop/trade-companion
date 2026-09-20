@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'api.dart';
+import 'events.dart';
 import 'theme.dart';
 import 'screens/dashboard.dart';
 import 'screens/chart.dart';
@@ -10,17 +11,23 @@ import 'screens/settings.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Api.load();
+  await ThemeController.I.load();
+  EventService.I.restart(); // starts the live event feed (waits until a token is set)
   runApp(const App());
 }
 
 class App extends StatelessWidget {
   const App({super.key});
   @override
-  Widget build(BuildContext context) => MaterialApp(
-        title: 'Trade Companion',
-        debugShowCheckedModeBanner: false,
-        theme: buildTheme(),
-        home: const Shell(),
+  Widget build(BuildContext context) => ListenableBuilder(
+        listenable: ThemeController.I,
+        builder: (context, _) => MaterialApp(
+          title: 'Trade Companion',
+          debugShowCheckedModeBanner: false,
+          navigatorKey: Toaster.navKey,
+          theme: buildTheme(ThemeController.I.pal),
+          home: const Shell(),
+        ),
       );
 }
 
