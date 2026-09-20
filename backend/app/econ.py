@@ -1,27 +1,39 @@
-"""Forex Factory economic calendar (free weekly JSON feed, no key) and red-folder alerts.
+"""Economic calendar with red-folder alerts.
 
-Only high-impact ("red folder") events for the currencies in CAL_CURRENCIES are tracked
-by default. Alerts are written to the activity log (kind "news"), which the push
-dispatcher forwards to your phone, so they arrive even when the app is closed."""
+Primary source: the free Forex Factory weekly JSON feed (two hosts). If both fail, a backup
+feed (TradingView calendar) is used so the Calendar screen is never empty. Only events for the
+currencies and impact levels chosen in the app's Settings are kept. Alerts go to the activity
+log (kind "news"); the push dispatcher forwards them to your phone even when the app is closed."""
 import asyncio, json, os, time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import httpx
-from . import events, config as C
+from . import events, prefs, config as C
 
-FEEDS = ["https://nfs.faireconomy.media/ff_calendar_thisweek.json",
-         "https://nfs.faireconomy.media/ff_calendar_nextweek.json"]   # next week is best effort
-UA = {"User-Agent": "Mozilla/5.0"}
+FF_URLS = ["https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+           "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json"]
+FF_NEXT = ["https://nfs.faireconomy.media/ff_calendar_nextweek.json",
+           "https://cdn-nfs.faireconomy.media/ff_calendar_nextweek.json"]
+TV_URL = "https://economic-calendar.tradingview.com/events"
+HEADERS = {"User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) "
+                         "Chrome/126.0 Mobile Safari/537.36",
+           "Accept": "application/json,text/plain,*/*", "Accept-Language": "en-US,en;q=0.9",
+           "Referer": "https://www.forexfactory.com/"}
+TV_HEADERS = {**HEADERS, "Origin": "https://www.tradingview.com", "Referer": "https://www.tradingview.com/"}
+TV_COUNTRIES = {"USD": ["US"], "EUR": ["EU", "DE", "FR", "IT", "ES"], "GBP": ["GB"], "JPY": ["JP"], "AUD": ["AU"],
+                "CAD": ["CA"], "CHF": ["CH"], "NZD": ["NZ"]}
 CACHE = C.BASE / "calendar_cache.json"
 SENT = C.BASE / "calendar_sent.json"
-AFFECTS = {"USD": "Gold, USD pairs, crypto", "EUR": "EUR/USD", "GBP": "GBP/USD", "JPY": "USD/JPY"}
+AFFECTS = {"USD": "Gold, USD pairs, crypto", "EUR": "EUR/USD", "GBP": "GBP/USD", "JPY": "USD/JPY",
+           "AUD": "AUD/USD", "CAD": "USD/CAD", "CHF": "USD/CHF", "NZD": "NZD/USD"}
 
-_st = {"events": [], "updated": 0.0, "fetched": 0.0, "error": None, "next_try": 0.0}
+_st = {"events": [], "updated": 0.0, "fetched": 0.0, "error": None, "next_try": 0.0,
+       "source": None, "attempts": []}
 
 
 def _load_cache():
     try:
         d = json.loads(CACHE.read_text())
-        _st["events"], _st["updated"] = d["events"], d["updated"]
+        _st["events"], _st["updated"], _st["source"] = d["events"], d["updated"], d.get("source")
     except Exception:
         pass
 
@@ -30,18 +42,12 @@ _load_cache()
 
 
 def cfg():
-    imp = os.getenv("CAL_IMPACT", "High").strip().lower()
-    levels = {"high"} if imp == "high" else ({"high", "medium"} if imp == "medium" else {"high", "medium", "low"})
-    leads = []
-    for x in os.getenv("CAL_LEADS", "60,15,0").split(","):
-        x = x.strip()
-        if x.isdigit():
-            leads.append(int(x))
+    p = prefs.get()["calendar"]
     return {
-        "levels": levels,
-        "cur": {c.strip().upper() for c in os.getenv("CAL_CURRENCIES", "USD,EUR,GBP,JPY").split(",") if c.strip()},
-        "leads": sorted(set(leads), reverse=True) or [60, 15, 0],
-        "alerts": os.getenv("CAL_ALERTS", "1").strip() != "0",
+        "levels": {"high"} if p["impact"] == "high" else {"high", "medium"},
+        "cur": set(p["currencies"]),
+        "leads": sorted(set(p["leads"]), reverse=True) or [60, 15, 0],
+        "alerts": p["alerts"],
         "tz": os.getenv("CAL_TZ", "UTC").strip() or "UTC",
     }
 
@@ -57,57 +63,139 @@ def local(ts, tzname):
     return d, f"UTC{off:+g}"
 
 
-def _norm(e):
+def _event(cur, title, ts, impact, forecast, previous):
+    return {"id": f"{cur}|{title}|{int(ts)}", "title": title, "currency": cur, "impact": impact, "ts": ts,
+            "forecast": forecast, "previous": previous}
+
+
+def _norm_ff(e):
     try:
-        dt = datetime.fromisoformat(str(e["date"]).replace("Z", "+00:00")).astimezone(timezone.utc)
+        dt = datetime.fromisoformat(str(e["date"]).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone(timedelta(hours=-5)))
         cur, title = str(e["country"]).upper(), str(e["title"]).strip()
     except Exception:
         return None
-    ts = dt.timestamp()
-    return {"id": f"{cur}|{title}|{int(ts)}", "title": title, "currency": cur,
-            "impact": str(e.get("impact") or "").lower(), "ts": ts,
-            "forecast": str(e.get("forecast") or ""), "previous": str(e.get("previous") or "")}
+    return _event(cur, title, dt.astimezone(timezone.utc).timestamp(), str(e.get("impact") or "").lower(),
+                  str(e.get("forecast") or ""), str(e.get("previous") or ""))
+
+
+def _fmt_val(v, unit):
+    if v is None or v == "":
+        return ""
+    return f"{v}{unit or ''}"
+
+
+def _norm_tv(e, rev):
+    try:
+        dt = datetime.fromisoformat(str(e["date"]).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        cur = str(e.get("currency") or rev.get(str(e.get("country")).upper(), "")).upper()
+        title = str(e["title"]).strip()
+        imp = {1: "high", 0: "medium", -1: "low"}.get(int(e.get("importance", -1)), "low")
+    except Exception:
+        return None
+    if not cur:
+        return None
+    unit = e.get("unit") or ""
+    return _event(cur, title, dt.astimezone(timezone.utc).timestamp(), imp,
+                  _fmt_val(e.get("forecast"), unit), _fmt_val(e.get("previous"), unit))
+
+
+async def _get_json(cl, url, params=None, headers=None):
+    r = await cl.get(url, params=params, headers=headers)
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}")
+    try:
+        return r.json()
+    except Exception:
+        raise RuntimeError("not JSON (blocked or rate limited)")
 
 
 async def refresh(force=False):
-    """Fetch the weekly feed. Runs at most every 30 min (5 min after a failure); the free feed
-    is rate limited per IP, so a failed fetch keeps the last good data."""
+    """Fetch the calendar. Runs at most every 30 min (5 min after a failure); a failed fetch keeps
+    the last good data. Force-refresh is limited to once per 60 seconds."""
     now = time.time()
     if force:
-        if now - _st["fetched"] < 120:
+        if now - _st["fetched"] < 60:
             return
     elif now < _st["next_try"]:
         return
-    out, week_ok, err = {}, False, None
-    async with httpx.AsyncClient(timeout=15, headers=UA, follow_redirects=True) as cl:
-        for i, url in enumerate(FEEDS):
+    attempts, out, source = [], {}, None
+    async with httpx.AsyncClient(timeout=15, headers=HEADERS, follow_redirects=True) as cl:
+        for url in FF_URLS:
+            t0 = time.time()
             try:
-                r = await cl.get(url)
-                if r.status_code != 200:
-                    raise RuntimeError(f"HTTP {r.status_code}")
-                for e in r.json():
-                    n = _norm(e)
-                    if n:
-                        out[n["id"]] = n
-                if i == 0:
-                    week_ok = True
+                data = await _get_json(cl, url)
+                got = [n for n in (_norm_ff(e) for e in data) if n]
+                if not got:
+                    raise RuntimeError("empty feed")
+                for n in got:
+                    out[n["id"]] = n
+                attempts.append({"source": "Forex Factory", "url": url.split("/")[2], "ok": True,
+                                 "count": len(got), "ms": int((time.time() - t0) * 1000)})
+                source = "Forex Factory"
+                break
             except Exception as ex:
-                if i == 0:
-                    err = f"{type(ex).__name__}: {str(ex)[:100]}"
-    _st["fetched"] = now
-    if week_ok:
+                attempts.append({"source": "Forex Factory", "url": url.split("/")[2], "ok": False,
+                                 "error": f"{type(ex).__name__}: {str(ex)[:80]}"})
+        if source == "Forex Factory":
+            for url in FF_NEXT:                       # best effort: the feed may not exist yet
+                try:
+                    for e in await _get_json(cl, url):
+                        n = _norm_ff(e)
+                        if n:
+                            out[n["id"]] = n
+                    break
+                except Exception:
+                    continue
+        else:
+            t0 = time.time()
+            try:
+                c = cfg()
+                rev = {ctry: cur for cur, cs in TV_COUNTRIES.items() for ctry in cs}
+                countries = ",".join(x for cur in c["cur"] for x in TV_COUNTRIES.get(cur, []))
+                start = datetime.now(timezone.utc) - timedelta(hours=6)
+                params = {"from": start.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                          "to": (start + timedelta(days=9)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                          "countries": countries}
+                data = await _get_json(cl, TV_URL, params, TV_HEADERS)
+                rows = data.get("result", data) if isinstance(data, dict) else data
+                got = [n for n in (_norm_tv(e, rev) for e in rows) if n]
+                if not got:
+                    raise RuntimeError("empty feed")
+                for n in got:
+                    out[n["id"]] = n
+                attempts.append({"source": "TradingView (backup)", "url": "economic-calendar.tradingview.com",
+                                 "ok": True, "count": len(got), "ms": int((time.time() - t0) * 1000)})
+                source = "TradingView (backup)"
+            except Exception as ex:
+                attempts.append({"source": "TradingView (backup)", "url": "economic-calendar.tradingview.com",
+                                 "ok": False, "error": f"{type(ex).__name__}: {str(ex)[:80]}"})
+    _st["fetched"], _st["attempts"] = now, attempts
+    if source:
         _st["events"] = sorted(out.values(), key=lambda e: e["ts"])
-        _st["updated"], _st["error"], _st["next_try"] = now, None, now + 1800
+        _st.update({"updated": now, "error": None, "next_try": now + 1800, "source": source})
         try:
-            CACHE.write_text(json.dumps({"events": _st["events"], "updated": now}))
+            CACHE.write_text(json.dumps({"events": _st["events"], "updated": now, "source": source}))
         except Exception:
             pass
     else:
-        _st["error"], _st["next_try"] = err or "feed unavailable", now + 300
+        errs = [a.get("error", "") for a in attempts if not a["ok"]]
+        _st["error"] = errs[0] if errs else "feed unavailable"
+        _st["next_try"] = now + 300
 
 
 def status():
-    return {"updated": _st["updated"], "error": _st["error"], "currencies": sorted(cfg()["cur"])}
+    return {"updated": _st["updated"], "error": _st["error"], "source": _st["source"],
+            "currencies": sorted(cfg()["cur"])}
+
+
+def diag():
+    return {"source": _st["source"], "updated": _st["updated"], "error": _st["error"],
+            "count": len(_st["events"]), "attempts": _st["attempts"],
+            "next_try_in": max(0, int(_st["next_try"] - time.time()))}
 
 
 def _levels(impact, c):

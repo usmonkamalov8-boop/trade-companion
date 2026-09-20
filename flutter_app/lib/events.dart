@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'api.dart';
+import 'prefs.dart';
 import 'theme.dart';
 import 'screens/activity.dart';
 
@@ -148,7 +149,7 @@ class EventService extends ChangeNotifier {
           if (wasLoaded) {
             unread += list.length;
             final now = DateTime.now().millisecondsSinceEpoch / 1000;
-            Toaster.show(list.where((e) => now - e.ts < 180).toList());
+            Toaster.show(list.where((e) => now - e.ts < 180 && LocalPrefs.I.allows(e.kind, e.level)).toList());
           }
         }
         notifyListeners();

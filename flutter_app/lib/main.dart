@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'api.dart';
 import 'events.dart';
+import 'prefs.dart';
 import 'theme.dart';
 import 'screens/dashboard.dart';
 import 'screens/chart.dart';
@@ -12,7 +13,9 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Api.load();
   await ThemeController.I.load();
+  await LocalPrefs.I.load();
   EventService.I.restart(); // starts the live event feed (waits until a token is set)
+  ServerPrefs.I.load();
   runApp(const App());
 }
 

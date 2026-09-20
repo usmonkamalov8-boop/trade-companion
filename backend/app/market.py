@@ -152,3 +152,57 @@ async def news(cat):
         items.sort(key=lambda i: i["ts"], reverse=True)
         return items[:40]
     return await _cached("news:" + cat, 300, go)
+
+
+# ------------------------------------------------- any timeframe (strategy analysis)
+
+_TTL = {"5m": 45, "15m": 90, "1h": 240, "4h": 600, "1d": 1800, "1w": 3600, "1M": 7200}
+_YF = {"5m": ("5m", "5d"), "15m": ("15m", "1mo"), "1h": ("60m", "1mo"), "1d": ("1d", "1y"), "1w": ("1wk", "5y"), "1M": ("1mo", "10y")}
+
+
+async def _yahoo_ttl(sym, interval, rng, ttl):
+    async def go():
+        async with _sem, httpx.AsyncClient(timeout=15) as cl:
+            r = await cl.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
+                             params={"interval": interval, "range": rng}, headers=UA)
+        r.raise_for_status()
+        res = r.json()["chart"]["result"][0]
+        q = res["indicators"]["quote"][0]
+        out = {k: [] for k in "tohlcv"}
+        for i, t in enumerate(res.get("timestamp") or []):
+            vals = [q["open"][i], q["high"][i], q["low"][i], q["close"][i]]
+            if any(x is None for x in vals):
+                continue
+            out["t"].append(t)
+            for k, x in zip("ohlc", vals):
+                out[k].append(x)
+            out["v"].append(0)
+        if len(out["c"]) < 18:
+            raise ValueError(f"not enough data for {sym} {interval}")
+        return out
+    return await _cached(f"y2:{sym}:{interval}:{rng}", ttl, go)
+
+
+async def klines_tf(name, kind, tf):
+    if kind == "crypto":
+        async def go():
+            async with _sem, httpx.AsyncClient(timeout=15) as cl:
+                r = await cl.get("https://fapi.binance.com/fapi/v1/klines",
+                                 params={"symbol": name + "USDT", "interval": tf, "limit": 300})
+            r.raise_for_status()
+            rows = r.json()
+            return {"t": [x[0] for x in rows], "o": [float(x[1]) for x in rows], "h": [float(x[2]) for x in rows],
+                    "l": [float(x[3]) for x in rows], "c": [float(x[4]) for x in rows], "v": [float(x[5]) for x in rows]}
+        return await _cached(f"k2:{name}:{tf}", _TTL[tf], go)
+    sym = C.FOREX[name][0]
+    if tf == "4h":
+        return resample(await klines_tf(name, kind, "1h"), 4)
+    interval, rng = _YF[tf]
+    return await _yahoo_ttl(sym, interval, rng, _TTL[tf])
+
+
+async def tfs(name, kind, wanted):
+    """Candles for several timeframes at once. Timeframes that fail are simply left out."""
+    uniq = list(dict.fromkeys(wanted))
+    res = await asyncio.gather(*[klines_tf(name, kind, tf) for tf in uniq], return_exceptions=True)
+    return {tf: r for tf, r in zip(uniq, res) if not isinstance(r, Exception)}

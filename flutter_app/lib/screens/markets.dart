@@ -2,19 +2,22 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../api.dart';
+import '../prefs.dart';
 import '../theme.dart';
+import 'settings.dart' show styleLabels;
 
 class MarketsPage extends StatelessWidget {
   const MarketsPage({super.key});
   @override
   Widget build(BuildContext context) => DefaultTabController(
-        length: 4,
+        length: 5,
         child: Scaffold(
           appBar: AppBar(
             title: const Text('Markets'),
             bottom: const TabBar(isScrollable: true, tabs: [
               Tab(text: 'Crypto'),
               Tab(text: 'Forex and gold'),
+              Tab(text: 'Setups'),
               Tab(text: 'Calendar'),
               Tab(text: 'News'),
             ]),
@@ -22,6 +25,7 @@ class MarketsPage extends StatelessWidget {
           body: const TabBarView(children: [
             MarketView('crypto'),
             MarketView('forex'),
+            SetupsView(),
             CalendarView(),
             NewsView(),
           ]),
@@ -229,6 +233,353 @@ class _NewsViewState extends State<NewsView> with AutomaticKeepAliveClientMixin 
   }
 }
 
+// ------------------------------------------------------------------- setups
+
+class SetupsView extends StatefulWidget {
+  const SetupsView({super.key});
+  @override
+  State<SetupsView> createState() => _SetupsViewState();
+}
+
+class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMixin {
+  String market = 'crypto';
+  String style = 'intraday';
+  List rows = [];
+  bool loading = false;
+  bool touched = false;
+  String? err;
+  int req = 0;
+
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  void initState() {
+    super.initState();
+    _boot();
+  }
+
+  Future<void> _boot() async {
+    if (!Api.ready) {
+      setState(() => err = 'Enter your API token in Settings to connect.');
+      return;
+    }
+    await ServerPrefs.I.load();
+    final st = ServerPrefs.I.section('analyst')['style'];
+    if (!touched && st is String && styleLabels.containsKey(st)) style = st;
+    if (mounted) _load();
+  }
+
+  Future<void> _load() async {
+    final my = ++req;
+    setState(() {
+      loading = true;
+      err = null;
+    });
+    try {
+      final d = await Api.get('/api/setups', {'market': market, 'style': style}) as Map<String, dynamic>;
+      if (mounted && my == req) setState(() => rows = d['setups'] as List);
+    } catch (e) {
+      if (mounted && my == req) setState(() => err = '$e');
+    }
+    if (mounted && my == req) setState(() => loading = false);
+  }
+
+  Widget _chip(Pal p, String text, Color c) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        margin: const EdgeInsets.only(right: 6),
+        decoration: BoxDecoration(color: Color.lerp(p.surface, c, 0.22), borderRadius: BorderRadius.circular(6)),
+        child: Text(text, style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: c)),
+      );
+
+  Color _statusColor(Pal p, String s) => s == 'READY' ? p.gain : (s == 'IN ZONE' ? p.warn : p.muted);
+
+  Widget _card(Pal p, Map<String, dynamic> r) {
+    final dir = '${r['direction']}';
+    final none = dir == 'none';
+    final col = none ? p.muted : (dir == 'long' ? p.gain : p.loss);
+    final conf = (r['confidence'] as num).toInt();
+    final cc = conf >= 70 ? p.gain : (conf >= 50 ? p.warn : p.muted);
+    final hasPoi = r['poi'] != null;
+    final tfs = (r['tf'] as List?) ?? [];
+    final notes = (r['notes'] as List?) ?? [];
+    final conflu = ((r['confluence'] as List?) ?? []).join(', ');
+    return Panel(
+      child: InkWell(
+        onTap: () => _detail(r),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Expanded(
+              child: Text('${r['name']}  ${r['label']}', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15.5)),
+            ),
+            Text('${r['price_str']}', style: numStyle.copyWith(color: p.muted)),
+          ]),
+          const SizedBox(height: 6),
+          Row(children: [
+            _chip(p, none ? 'NO TRADE' : dir.toUpperCase(), col),
+            _chip(p, '${r['status']}', _statusColor(p, '${r['status']}')),
+            const Spacer(),
+            Text('${r['confidence']}', style: numStyle.copyWith(color: cc, fontWeight: FontWeight.w800, fontSize: 16)),
+            Text(' ${r['conf_label']}', style: TextStyle(color: cc, fontSize: 12)),
+          ]),
+          const SizedBox(height: 6),
+          LinearProgressIndicator(
+            value: conf / 100,
+            minHeight: 4,
+            color: cc,
+            backgroundColor: p.outline,
+            borderRadius: BorderRadius.circular(2),
+          ),
+          const SizedBox(height: 8),
+          if (hasPoi) ...[
+            Text('POI  ${r['poi']}${conflu.isEmpty ? '' : '  (+ $conflu)'}', style: numStyle.copyWith(fontSize: 12.5)),
+            Text('Entry ${r['entry']}   Stop ${r['stop']}', style: numStyle.copyWith(fontSize: 12.5)),
+            Text('TP1 ${r['tp1']} (${r['rr1']}R)   TP2 ${r['tp2']} (${r['rr2']}R)', style: numStyle.copyWith(fontSize: 12.5)),
+          ] else if (notes.isNotEmpty)
+            Text('${notes.first}', style: TextStyle(color: p.muted, fontSize: 12.5)),
+          if (r['refine'] != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text('Micro entry: ${r['refine']}', style: numStyle.copyWith(fontSize: 12.5, color: p.accent)),
+            ),
+          const SizedBox(height: 8),
+          Text('STRUCTURE BY TIMEFRAME  (BOS / CHoCH / OB / FVG)',
+              style: TextStyle(color: p.muted, fontSize: 10.5, letterSpacing: 0.6, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 4),
+          for (final t in tfs) _tfRow(p, t as Map<String, dynamic>),
+        ]),
+      ),
+    );
+  }
+
+  Widget _tfRow(Pal p, Map<String, dynamic> t) {
+    final trend = (t['trend'] as num).toInt();
+    final col = trend == 1 ? p.gain : (trend == -1 ? p.loss : p.muted);
+    final arrow = trend == 1 ? '\u25B2' : (trend == -1 ? '\u25BC' : '\u2013');
+    Color dc(dynamic d) => (d as num).toInt() == 1 ? p.gain : p.loss;
+    String ar(dynamic d) => (d as num).toInt() == 1 ? '\u2191' : '\u2193';
+    final bos = t['bos'] as Map<String, dynamic>?;
+    final choch = t['choch'] as Map<String, dynamic>?;
+    final ob = (t['ob'] as List?) ?? [];
+    final fvg = (t['fvg'] as List?) ?? [];
+    final role = '${t['role'] ?? ''}';
+    final spans = <InlineSpan>[];
+    if (bos != null) {
+      spans.add(TextSpan(text: 'BOS${ar(bos['dir'])} ${bos['ago']}b', style: TextStyle(color: dc(bos['dir']))));
+    }
+    if (choch != null) {
+      if (spans.isNotEmpty) spans.add(const TextSpan(text: '   '));
+      spans.add(TextSpan(text: 'CHoCH${ar(choch['dir'])} ${choch['ago']}b', style: TextStyle(color: dc(choch['dir']))));
+    }
+    if (spans.isEmpty) spans.add(TextSpan(text: 'no structure break', style: TextStyle(color: p.muted)));
+    final zones = <InlineSpan>[];
+    if (ob.isNotEmpty) {
+      final z = ob.first as Map<String, dynamic>;
+      zones.add(TextSpan(text: 'OB ${z['dir'] == 1 ? '\u25B2' : '\u25BC'} ${z['zone']}', style: TextStyle(color: dc(z['dir']))));
+    }
+    if (fvg.isNotEmpty) {
+      final z = fvg.first as Map<String, dynamic>;
+      if (zones.isNotEmpty) zones.add(const TextSpan(text: '   '));
+      zones.add(TextSpan(text: 'FVG ${z['dir'] == 1 ? '\u25B2' : '\u25BC'} ${z['zone']}', style: TextStyle(color: dc(z['dir']))));
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        SizedBox(width: 38, child: Text('${t['tf']}', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12.5, color: col))),
+        SizedBox(width: 16, child: Text(arrow, style: TextStyle(fontSize: 11, color: col))),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text.rich(TextSpan(children: spans), style: numStyle.copyWith(fontSize: 12, fontWeight: FontWeight.w600)),
+            if (zones.isNotEmpty) Text.rich(TextSpan(children: zones), style: numStyle.copyWith(fontSize: 11.5)),
+          ]),
+        ),
+        if (role.isNotEmpty) Text(role, style: TextStyle(color: p.muted, fontSize: 10.5)),
+      ]),
+    );
+  }
+
+  void _detail(Map<String, dynamic> r) {
+    final p = context.pal;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: p.surface,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (_) => FractionallySizedBox(
+        heightFactor: 0.92,
+        child: _DetailSheet(name: '${r['name']}', label: '${r['label']}', style: style),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    final p = context.pal;
+    return RefreshIndicator(
+      onRefresh: _load,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(12),
+        children: [
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(value: 'crypto', label: Text('Crypto')),
+              ButtonSegment(value: 'forex', label: Text('Forex and gold')),
+            ],
+            selected: {market},
+            onSelectionChanged: (s) {
+              setState(() {
+                market = s.first;
+                rows = [];
+              });
+              _load();
+            },
+          ),
+          const SizedBox(height: 8),
+          SegmentedButton<String>(
+            segments: [for (final e in styleLabels.entries) ButtonSegment(value: e.key, label: Text(e.value))],
+            selected: {style},
+            onSelectionChanged: (s) {
+              touched = true;
+              setState(() {
+                style = s.first;
+                rows = [];
+              });
+              _load();
+            },
+          ),
+          const SizedBox(height: 6),
+          Text(
+            style == 'scalp'
+                ? 'Scalp: 1H bias, 15m setup, 5m trigger.'
+                : (style == 'swing' ? 'Swing: weekly bias, daily setup, 4H trigger.' : 'Intraday: 4H bias, 1H setup, 15m trigger.'),
+            style: TextStyle(color: p.muted, fontSize: 12),
+          ),
+          Text('Every style reads MN, 1W, 1D, 4H, 1H, 15m and 5m. Higher timeframes set the bias; 5m refines the entry.',
+              style: TextStyle(color: p.muted, fontSize: 12)),
+          const SizedBox(height: 6),
+          if (loading) const LinearProgressIndicator(),
+          if (err != null)
+            Panel(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(err!, style: TextStyle(color: p.loss)),
+                TextButton(onPressed: _boot, child: const Text('Retry')),
+              ]),
+            ),
+          if (rows.isEmpty && !loading && err == null)
+            Padding(
+              padding: const EdgeInsets.all(24),
+              child: Text('No data yet. Pull down to refresh.', textAlign: TextAlign.center, style: TextStyle(color: p.muted)),
+            ),
+          for (final r in rows) _card(p, r as Map<String, dynamic>),
+          const SizedBox(height: 8),
+          Text(
+            'Tap a card for the full multi-timeframe report. Setups are rule-based ideas built from structure, '
+            'order blocks, FVG, supply and demand, Fibonacci, trendlines and liquidity. Not financial advice.',
+            style: TextStyle(color: p.muted, fontSize: 12, height: 1.4),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DetailSheet extends StatefulWidget {
+  final String name, label, style;
+  const _DetailSheet({required this.name, required this.label, required this.style});
+  @override
+  State<_DetailSheet> createState() => _DetailSheetState();
+}
+
+class _DetailSheetState extends State<_DetailSheet> {
+  static const focuses = {
+    '': 'Full report',
+    'topdown': 'Top-down (all TFs)',
+    'structure': 'BOS / CHoCH',
+    'ob': 'Order blocks',
+    'fvg': 'Fair value gaps',
+    'sd': 'Supply / demand',
+    'sr': 'Support / resistance',
+    'fib': 'Fibonacci',
+    'trend': 'Trendlines',
+    'liquidity': 'Liquidity',
+    'ict': 'ICT',
+    'poi': 'POI and setup',
+  };
+  String focus = '';
+  String? text;
+  String? err;
+  int req = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final my = ++req;
+    setState(() {
+      text = null;
+      err = null;
+    });
+    try {
+      final d = await Api.get('/api/analysis', {'name': widget.name, 'style': widget.style, if (focus.isNotEmpty) 'focus': focus})
+          as Map<String, dynamic>;
+      if (mounted && my == req) setState(() => text = '${d['text']}');
+    } catch (e) {
+      if (mounted && my == req) setState(() => err = '$e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.pal;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Expanded(
+            child: Text('${widget.name}  ${widget.label}  -  ${styleLabels[widget.style] ?? ''}',
+                style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+          ),
+          IconButton(onPressed: () => Navigator.of(context).pop(), icon: const Icon(Icons.close)),
+        ]),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(children: [
+            for (final e in focuses.entries)
+              Padding(
+                padding: const EdgeInsets.only(right: 6),
+                child: ChoiceChip(
+                  label: Text(e.value),
+                  selected: focus == e.key,
+                  onSelected: (_) {
+                    focus = e.key;
+                    _load();
+                  },
+                ),
+              ),
+          ]),
+        ),
+        const SizedBox(height: 8),
+        Expanded(
+          child: err != null
+              ? Text(err!, style: TextStyle(color: p.loss))
+              : (text == null
+                  ? const Center(child: CircularProgressIndicator())
+                  : SingleChildScrollView(
+                      child: SelectableText(text!, style: numStyle.copyWith(fontSize: 12.8, height: 1.5)),
+                    )),
+        ),
+      ]),
+    );
+  }
+}
+
+// ------------------------------------------------------------------ calendar
+
 class CalendarView extends StatefulWidget {
   const CalendarView({super.key});
   @override
@@ -244,8 +595,12 @@ class _CalendarViewState extends State<CalendarView> with AutomaticKeepAliveClie
   String impact = 'high';
   String? err;
   String? feedErr;
+  String? source;
+  String? notice;
   double updated = 0;
   bool loading = false;
+  bool loaded = false;
+  bool busy = false;
   Timer? tick;
 
   @override
@@ -254,8 +609,13 @@ class _CalendarViewState extends State<CalendarView> with AutomaticKeepAliveClie
   @override
   void initState() {
     super.initState();
-    if (Api.ready) _load(false);
-    tick = Timer.periodic(const Duration(seconds: 30), (_) {
+    if (ServerPrefs.I.section('calendar')['impact'] == 'medium') impact = 'medium';
+    if (Api.ready) {
+      _load(false);
+    } else {
+      err = 'Enter your API token in Settings to connect.';
+    }
+    tick = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() {});
     });
   }
@@ -283,6 +643,16 @@ class _CalendarViewState extends State<CalendarView> with AutomaticKeepAliveClie
     return 'in ${h ~/ 24}d ${h % 24}h';
   }
 
+  /// Live countdown for the hero card: mm:ss under an hour.
+  String _countdown(double ts) {
+    final s = ((ts * 1000 - DateTime.now().millisecondsSinceEpoch) / 1000).round();
+    if (s <= 0) return 'NOW';
+    if (s < 3600) return '${_two(s ~/ 60)}:${_two(s % 60)}';
+    final h = s ~/ 3600;
+    if (h < 24) return '${h}h ${_two((s % 3600) ~/ 60)}m';
+    return '${h ~/ 24}d ${h % 24}h';
+  }
+
   Future<void> _load(bool refresh) async {
     if (!Api.ready) {
       setState(() => err = 'Enter your API token in Settings to connect.');
@@ -302,8 +672,10 @@ class _CalendarViewState extends State<CalendarView> with AutomaticKeepAliveClie
         setState(() {
           items = d['events'] as List;
           feedErr = d['error'] as String?;
+          source = d['source'] as String?;
           updated = (d['updated'] as num?)?.toDouble() ?? 0;
           cur = (d['currencies'] as List?) ?? [];
+          loaded = true;
         });
       }
     } catch (e) {
@@ -313,11 +685,70 @@ class _CalendarViewState extends State<CalendarView> with AutomaticKeepAliveClie
   }
 
   Future<void> _testAlert() async {
+    setState(() {
+      busy = true;
+      notice = null;
+    });
     try {
       await Api.post('/api/calendar/test');
+      final popup = LocalPrefs.I.allows('news', 'warning');
+      notice = popup
+          ? 'Test alert sent. A pop-up should appear in a moment, and a push notification if push is enabled.'
+          : 'Test alert sent to the activity log and push. Pop-ups for news are switched off in Settings > Notifications.';
     } catch (e) {
-      if (mounted) setState(() => err = '$e');
+      notice = 'Could not send the test alert: $e';
     }
+    if (mounted) setState(() => busy = false);
+  }
+
+  Widget _hero(Pal p, double now) {
+    Map<String, dynamic>? next;
+    for (final raw in items) {
+      final e = raw as Map<String, dynamic>;
+      if ((e['ts'] as num).toDouble() > now - 30) {
+        next = e;
+        break;
+      }
+    }
+    if (next == null) {
+      return Panel(
+        child: Row(children: [
+          Icon(Icons.event_available, color: p.muted),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(loaded ? 'No matching events in the next 7 days.' : 'Loading the calendar...',
+                style: TextStyle(color: p.muted)),
+          ),
+        ]),
+      );
+    }
+    final ts = (next['ts'] as num).toDouble();
+    final col = next['impact'] == 'high' ? p.loss : p.warn;
+    final soon = ts - now < 3600;
+    final aff = '${next['affects'] ?? ''}';
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: p.surface,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: soon ? col : p.outline, width: soon ? 1.8 : 1),
+      ),
+      child: Row(children: [
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('NEXT EVENT', style: TextStyle(color: p.muted, fontSize: 11, letterSpacing: 1)),
+            const SizedBox(height: 4),
+            Text('${next['currency']}  ${next['title']}', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15.5)),
+            const SizedBox(height: 2),
+            Text('${_clock(ts)} your time${aff.isEmpty ? '' : '  -  affects $aff'}',
+                style: TextStyle(color: p.muted, fontSize: 12.5)),
+          ]),
+        ),
+        const SizedBox(width: 10),
+        Text(_countdown(ts), style: numStyle.copyWith(fontSize: 26, fontWeight: FontWeight.w800, color: soon ? col : null)),
+      ]),
+    );
   }
 
   Widget _row(Pal p, Map<String, dynamic> e, DateTime d, double ts, double now) {
@@ -369,6 +800,19 @@ class _CalendarViewState extends State<CalendarView> with AutomaticKeepAliveClie
     );
   }
 
+  Widget _skeleton(Pal p) => Column(children: [
+        for (var i = 0; i < 3; i++)
+          Container(
+            height: 62,
+            margin: const EdgeInsets.only(bottom: 8),
+            decoration: BoxDecoration(
+              color: p.surface,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: p.outline),
+            ),
+          ),
+      ]);
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -387,12 +831,14 @@ class _CalendarViewState extends State<CalendarView> with AutomaticKeepAliveClie
       }
       rows.add(_row(p, e, d, ts, now));
     }
+    final backup = (source ?? '').toLowerCase().contains('backup');
     return RefreshIndicator(
       onRefresh: () => _load(true),
       child: ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.all(12),
         children: [
+          _hero(p, now),
           SegmentedButton<String>(
             segments: const [
               ButtonSegment(value: 'high', label: Text('Red folder')),
@@ -405,32 +851,62 @@ class _CalendarViewState extends State<CalendarView> with AutomaticKeepAliveClie
             },
           ),
           const SizedBox(height: 8),
-          Text('Tracking ${cur.join(', ')}. Gold follows USD. Times use your phone time zone.',
-              style: TextStyle(color: p.muted, fontSize: 12)),
-          if (loading) const LinearProgressIndicator(),
-          if (err != null) Panel(child: Text(err!, style: TextStyle(color: p.loss))),
-          if (feedErr != null)
-            Panel(
-              child: Text('Calendar feed problem: $feedErr. Showing the last data received.',
-                  style: TextStyle(color: p.warn)),
-            ),
-          if (items.isEmpty && !loading && err == null)
-            Padding(
-              padding: const EdgeInsets.all(24),
-              child: Text('No matching events in the next 7 days.',
-                  textAlign: TextAlign.center, style: TextStyle(color: p.muted)),
-            ),
-          ...rows,
-          const SizedBox(height: 12),
           Row(children: [
             Expanded(
-              child: Text(
-                updated > 0 ? 'Source: Forex Factory weekly feed. Updated ${_clock(updated)}.' : 'Source: Forex Factory weekly feed.',
-                style: TextStyle(color: p.muted, fontSize: 12),
+              child: OutlinedButton.icon(
+                onPressed: loading ? null : () => _load(true),
+                icon: const Icon(Icons.refresh, size: 18),
+                label: const Text('Refresh'),
               ),
             ),
-            TextButton(onPressed: _testAlert, child: const Text('Test alert')),
+            const SizedBox(width: 8),
+            Expanded(
+              child: FilledButton.icon(
+                onPressed: busy ? null : _testAlert,
+                icon: const Icon(Icons.notifications_active_outlined, size: 18),
+                label: const Text('Test alert'),
+              ),
+            ),
           ]),
+          if (notice != null)
+            Padding(padding: const EdgeInsets.only(top: 8), child: Text(notice!, style: TextStyle(color: p.gain, fontSize: 12.5))),
+          const SizedBox(height: 6),
+          Text('Tracking ${cur.isEmpty ? 'USD, EUR, GBP, JPY' : cur.join(', ')}. Gold follows USD. Times use your phone time zone.',
+              style: TextStyle(color: p.muted, fontSize: 12)),
+          if (loading) const Padding(padding: EdgeInsets.only(top: 6), child: LinearProgressIndicator()),
+          if (err != null)
+            Panel(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(err!, style: TextStyle(color: p.loss)),
+                TextButton(onPressed: () => _load(false), child: const Text('Retry')),
+              ]),
+            ),
+          if (feedErr != null)
+            Panel(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(
+                  items.isEmpty
+                      ? 'The calendar feed could not be reached from the server ($feedErr). Try again in a minute, '
+                          'or open Settings > Diagnostics to see what failed.'
+                      : 'Calendar feed problem ($feedErr). Showing the last data received.',
+                  style: TextStyle(color: p.warn),
+                ),
+                TextButton(onPressed: () => _load(true), child: const Text('Retry now')),
+              ]),
+            ),
+          if (backup)
+            Text('Forex Factory is not reachable from the server, so a backup feed is shown. Times and impact levels may differ slightly.',
+                style: TextStyle(color: p.warn, fontSize: 12)),
+          const SizedBox(height: 6),
+          if (loading && items.isEmpty) _skeleton(p),
+          ...rows,
+          const SizedBox(height: 12),
+          Text(
+            source == null
+                ? 'Source: Forex Factory weekly feed.'
+                : 'Source: $source${updated > 0 ? '. Updated ${_clock(updated)}' : ''}.',
+            style: TextStyle(color: p.muted, fontSize: 12),
+          ),
         ],
       ),
     );

@@ -1,27 +1,27 @@
 """Background push notifications through ntfy (https://ntfy.sh or your own ntfy server).
 
-Every new row in the activity log (from the API, the watcher or the bot) that matches
-PUSH_KINDS is sent to your private topic. The ntfy Android app shows the banner even when
-Trade Companion is closed."""
+Every new row in the activity log (from the API, the watcher, the calendar or the bot) whose
+category is enabled in the app's Settings is sent to your private topic. The ntfy Android app
+shows the banner even when Trade Companion is closed."""
 import asyncio, json, os, time
 import httpx
-from . import events, config as C
+from . import events, prefs, config as C
 
 STATE = C.BASE / "push_state.json"
-DEFAULT_KINDS = "position,trade,command,service,warning,news"
 _TITLES = {"position": "Position update", "trade": "Trade update", "command": "Bot control action",
-           "service": "Bot service change", "warning": "Alert", "news": "News alert"}
+           "service": "Bot service change", "warning": "Alert", "news": "News alert",
+           "risk": "Risk change", "profile": "Profile change", "system": "System message"}
 
 
 def cfg():
-    kinds = os.getenv("PUSH_KINDS", DEFAULT_KINDS)
+    p = prefs.get()["push"]
     return {
         "topic": os.getenv("NTFY_TOPIC", "").strip(),
         "server": os.getenv("NTFY_SERVER", "https://ntfy.sh").strip().rstrip("/"),
         "token": os.getenv("NTFY_TOKEN", "").strip(),
-        "detail": os.getenv("PUSH_DETAIL", "full").strip().lower(),
-        "kinds": {k.strip() for k in kinds.split(",") if k.strip()},
-        "on": os.getenv("PUSH_ENABLED", "1").strip() != "0",
+        "detail": p["detail"],
+        "kinds": p["kinds"],
+        "on": p["enabled"],
     }
 
 
@@ -32,11 +32,12 @@ def enabled(c=None):
 
 def info():
     c = cfg()
-    return {"enabled": enabled(c), "server": c["server"], "topic": c["topic"], "detail": c["detail"]}
+    return {"enabled": enabled(c), "configured": bool(c["topic"]), "server": c["server"], "topic": c["topic"],
+            "detail": c["detail"]}
 
 
 def should_push(e, c):
-    return e["kind"] in c["kinds"] or e["level"] == "error"
+    return bool(c["kinds"].get(e["kind"], False)) or e["level"] == "error"
 
 
 def build(e, c):
@@ -73,7 +74,7 @@ async def _post(body, c):
 
 async def send_test():
     c = cfg()
-    if not enabled(c):
+    if not c["topic"]:
         raise RuntimeError("Push is not configured (set NTFY_TOPIC in backend/.env)")
     await _post({"topic": c["topic"], "title": "Trade Companion test",
                  "message": "If you see this with the app closed, background push works.",

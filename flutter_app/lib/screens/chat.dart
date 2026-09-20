@@ -15,10 +15,17 @@ class _ChatPageState extends State<ChatPage> {
   bool busy = false;
   static const quick = [
     'How are my positions?',
-    'How did the bot do this week?',
+    'Best intraday setups',
+    'Scalp setups now',
+    'Swing setup gold',
+    'Intraday setup BTC',
+    'Order blocks ETH',
+    'Top-down SOL',
+    'Fib and premium discount EURUSD',
+    'Red folder calendar',
     'Crypto briefing',
     'Forex and gold outlook',
-    'Best setups now',
+    'How did the bot do this week?',
     'News sentiment',
     'Risk settings',
   ];

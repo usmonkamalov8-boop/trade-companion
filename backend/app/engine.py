@@ -2,7 +2,7 @@
 briefings and answers chat questions. No paid API, no LLM, no keys."""
 import asyncio, re, time
 from datetime import datetime, timezone
-from . import analytics as A, bot, market, config as C
+from . import analytics as A, bot, market, prefs, strategy, config as C
 
 _scan_cache = {}
 DISCLAIMER = "Rule-based analysis of live data. Not financial advice."
@@ -149,7 +149,7 @@ def _usd_index(rows):
 # ---------------------------------------------------------------- briefings
 
 
-async def crypto_briefing():
+async def _crypto_briefing_base():
     rows, fng, fund, items, pos = await asyncio.gather(
         scan("crypto"), market.fear_greed(), market.funding(),
         _safe(market.news("crypto")), _safe(bot.positions()))
@@ -184,7 +184,7 @@ async def crypto_briefing():
     return "\n".join(L)
 
 
-async def forex_briefing():
+async def _forex_briefing_base():
     rows, items = await asyncio.gather(scan("forex"), _safe(market.news("forex")))
     items = items or []
     if not rows:
@@ -387,10 +387,166 @@ async def calendar_text():
     return "\n".join(L)
 
 
+# ------------------------------------------------- multi-strategy analysis (strategy.py)
+
+_an_cache = {}
+
+
+def _mods():
+    return prefs.get()["analyst"]["modules"]
+
+
+def _style_of(ql):
+    if _has(ql, "scalp"):
+        return "scalp"
+    if _has(ql, "intraday", "day trad", "day-trad", "daytrad"):
+        return "intraday"
+    if _has(ql, "swing", "position trad"):
+        return "swing"
+    return None
+
+
+_FOCUS = [
+    ("topdown", r"top[- ]?down|multi[- ]?timeframe|\bmtf\b|alignment"),
+    ("poi", r"\bpois?\b|points? of interest"),
+    ("ob", r"order[- ]?blocks?|\bobs?\b|breaker"),
+    ("fvg", r"\bfvgs?\b|fair value|imbalance"),
+    ("sd", r"\bsupply\b|\bdemand\b|\bs&d\b|\bsnd\b"),
+    ("fib", r"\bfib|retracement|golden pocket|\bote\b|premium|discount|extension"),
+    ("trend", r"trend ?lines?|channel|dynamic level|breakout"),
+    ("liquidity", r"liquidity|sweep|stop hunt|equal (?:highs|lows)"),
+    ("ict", r"\bict\b|inner circle|kill ?zone|silver bullet|power of 3|\bpo3\b"),
+    ("structure", r"\bsmc\b|smart money|\bbos\b|choch|market structure|structure"),
+    ("sr", r"support|resistance|key levels?|\bs/r\b"),
+]
+
+
+def _focus_of(ql):
+    for key, pat in _FOCUS:
+        if re.search(pat, ql):
+            return key
+    return None
+
+
+async def analyze(name, style):
+    mods = _mods()
+    key = (name, style, tuple(sorted(mods.items())))
+    hit = _an_cache.get(key)
+    if hit and time.time() - hit[0] < 60:
+        return hit[1]
+    kind = "crypto" if name in C.CRYPTO else "forex"
+    cfg = strategy.STYLES[style]
+    tfs = await market.tfs(name, kind, list(strategy.ALL_TFS))
+    dec = None if kind == "crypto" else C.FOREX[name][1]
+    res = await asyncio.to_thread(strategy.build, name, kind, style, tfs, dec, mods, time.time())
+    _an_cache[key] = (time.time(), res)
+    if len(_an_cache) > 200:
+        for k in sorted(_an_cache, key=lambda k: _an_cache[k][0])[:50]:
+            _an_cache.pop(k, None)
+    return res
+
+
+def _default_style():
+    return prefs.get()["analyst"]["style"]
+
+
+async def strategy_report(name, style=None, focus=None):
+    style = style if style in strategy.STYLES else _default_style()
+    res = await analyze(name, style)
+    text = strategy.report_text(res, f"{name} ({C.LABELS.get(name, name)})", focus, _mods())
+    extra = []
+    if name in C.CRYPTO and not res.get("error"):
+        pos = await _safe(bot.positions())
+        for p in pos or []:
+            if p["symbol"] == name + "USDT":
+                d = res["setup"]["direction"]
+                want = "long" if p["side"] == "LONG" else "short"
+                rel = "matches" if d == want else ("goes against" if d != "none" else "has no clear")
+                extra.append(f"Your position: {_pos_line(p, None)} - it {rel} the {style} setup direction.")
+    if not focus:
+        try:
+            rows = await scan("crypto" if name in C.CRYPTO else "forex")
+            r = next((x for x in rows if x["name"] == name), None)
+            if r:
+                extra.append(f"Indicator snapshot: {r['bias']} ({r['score']:+d}), RSI {_rsi_s(r['rsi'])}, "
+                             f"support {r['support_str']}, resistance {r['resistance_str']}.")
+        except Exception:
+            pass
+    tail = "\n\nRule-based analysis of live data."
+    block = ("\n\n" + "\n".join(extra)) if extra else ""
+    return text.replace(tail, block + tail) if tail in text else text + block
+
+
+async def setups_list(kind, style):
+    names = list(C.CRYPTO) if kind == "crypto" else [n for n in C.FOREX if n != "DXY"]
+    sem = asyncio.Semaphore(4)
+
+    async def one(n):
+        async with sem:
+            try:
+                res = await analyze(n, style)
+            except Exception:
+                return None
+        return strategy.public(res, C.LABELS.get(n, n))
+
+    rows = [r for r in await asyncio.gather(*[one(n) for n in names]) if r and not r.get("error")]
+    rows.sort(key=lambda r: (0 if r["direction"] != "none" and r.get("poi") else 1, -r["confidence"]))
+    return rows
+
+
+async def setups_ranking_text(style=None, focus=None):
+    style = style if style in strategy.STYLES else _default_style()
+    crypto, fx = await asyncio.gather(setups_list("crypto", style), setups_list("forex", style))
+    rows = [r for r in crypto + fx if r["direction"] != "none" and r.get("poi")]
+    rows.sort(key=lambda r: -r["confidence"])
+    L = [f"BEST {strategy.STYLES[style]['label'].upper()} SETUPS - {_now()}", ""]
+    if not rows:
+        L.append("No clean setups right now: structure and zones do not line up. Waiting is a position.")
+    for r in rows[:6]:
+        L.append(f"{r['name']} {r['direction'].upper()} [{r['status']}] confidence {r['confidence']} ({r['conf_label']})")
+        L.append(f"   {r['poi']} | entry {r['entry']} | stop {r['stop']} | TP1 {r['tp1']} ({r['rr1']}R)")
+    rest = [r["name"] for r in crypto + fx if r not in rows]
+    if rest:
+        L += ["", "No clear setup: " + ", ".join(rest)]
+    L += ["", "Ask for details, for example: 'intraday setup BTC', 'order blocks ETH', 'fib gold', 'top-down SOL', "
+          "'scalp EURUSD'.", DISCLAIMER]
+    return "\n".join(L)
+
+
+async def _setup_block(kind):
+    try:
+        style = _default_style()
+        rows = await asyncio.wait_for(setups_list(kind, style), 8)
+    except Exception:
+        return ""
+    good = [r for r in rows if r["direction"] != "none" and r.get("poi")][:3]
+    if not good:
+        return ""
+    L = [f"TOP SETUPS ({strategy.STYLES[style]['label']})"]
+    for r in good:
+        L.append(f"{r['name']} {r['direction'].upper()} [{r['status']}] confidence {r['confidence']}: zone {r['entry']}, stop {r['stop']}, TP1 {r['tp1']} ({r['rr1']}R)")
+    return "\n".join(L)
+
+
+def _insert_block(text, block):
+    if not block:
+        return text
+    tail = "\n\n" + DISCLAIMER
+    return text.replace(tail, "\n\n" + block + tail) if tail in text else text + "\n\n" + block
+
+
+async def crypto_briefing():
+    return _insert_block(await _crypto_briefing_base(), await _setup_block("crypto"))
+
+
+async def forex_briefing():
+    return _insert_block(await _forex_briefing_base(), await _setup_block("forex"))
+
+
 HELP = ("I'm the built-in market analyst (free, rule-based). Ask me things like:\n"
         "- How are my positions?\n- How did the bot do this week?\n- Is the bot halted?\n"
         "- Risk settings for hier and scalp\n- Analyze BTC / SOL / gold / EURUSD\n"
-        "- Crypto briefing / Forex briefing\n- Best setups now\n- News and sentiment\n- Red-folder calendar")
+        "- Crypto briefing / Forex briefing\n- Best setups now / best scalp setups\n- Intraday setup BTC, swing setup gold, scalp EURUSD\n- Order blocks ETH, FVG SOL, fib gold, supply and demand, liquidity, trendlines\n- Top-down analysis of BTC (SMC / ICT)\n- News and sentiment\n- Red-folder calendar")
 
 
 def find_assets(q):
@@ -424,6 +580,15 @@ async def answer(question, history=None):
                     break
     if _has(ql, "forex", "fx") and not any(a in C.FOREX and a not in ("XAUUSD", "DXY") for a in assets):
         return await forex_briefing()
+    style = _style_of(ql)
+    focus = _focus_of(ql)
+    ops = _has(ql, "profile", "hier", "halt", "status", "pnl", "balance", "settings")
+    sw = _has(ql, "setup", "trade idea", "entry", "stop loss", "take profit", "risk reward", "top-down", "top down",
+              "strategy", "poi", "zone", "trade plan", "smc", "ict")
+    if assets and not ops:
+        return await strategy_report(assets[0], style, focus)
+    if not assets and (style or focus or sw) and not ops:
+        return await setups_ranking_text(style, focus)
     if assets:
         parts = [await asset_report(n) for n in assets[:2]]
         return "\n\n".join(parts)

@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from . import bot, econ, engine, events, market, push, watcher, config as C
+from . import bot, econ, engine, events, market, prefs, push, strategy, watcher, config as C
 
 
 @asynccontextmanager
@@ -171,6 +171,33 @@ async def push_test():
     return {"ok": True}
 
 
+# ------------------------------------------------------ preferences / diagnostics
+
+
+class PrefsIn(BaseModel):
+    push: dict | None = None
+    calendar: dict | None = None
+    analyst: dict | None = None
+
+
+@api.get("/prefs")
+async def prefs_get():
+    return prefs.get()
+
+
+@api.post("/prefs")
+async def prefs_set(b: PrefsIn):
+    patch = {k: v for k, v in b.model_dump().items() if v is not None}
+    return prefs.save(patch)
+
+
+@api.get("/diagnostics")
+async def diagnostics():
+    st = bot.load()
+    return {"time": int(time.time()), "service": bot.service_state(), "halted": st["halted"],
+            "events": {"last_id": events.last_id()}, "push": push.info(), "calendar": econ.diag()}
+
+
 # --------------------------------------------------------- economic calendar
 
 
@@ -189,6 +216,12 @@ async def calendar_test():
     return {"ok": True}
 
 
+@api.post("/calendar/refresh")
+async def calendar_refresh():
+    await econ.refresh(force=True)
+    return econ.diag()
+
+
 # ---------------------------------------------------------------- markets
 
 
@@ -201,6 +234,34 @@ def _kind(m: str) -> str:
 @api.get("/scanner")
 async def scanner(m: str = Query("crypto", alias="market")):
     return engine.public_rows(await engine.scan(_kind(m)))
+
+
+def _asset(name: str) -> str:
+    n = name.upper()
+    if n not in C.CRYPTO and n not in C.FOREX:
+        raise HTTPException(400, "unknown asset")
+    return n
+
+
+def _style(s: str | None) -> str:
+    return s if s in strategy.STYLES else prefs.get()["analyst"]["style"]
+
+
+@api.get("/analysis")
+async def analysis(name: str, style: str | None = None, focus: str | None = None):
+    """Multi-strategy, multi-timeframe analysis of one asset: structured summary plus a text report."""
+    n, st = _asset(name), _style(style)
+    res = await engine.analyze(n, st)
+    label = C.LABELS.get(n, n)
+    f = focus if focus in ("topdown", "structure", "ob", "fvg", "sd", "sr", "fib", "trend", "liquidity", "ict", "poi") else None
+    return {"summary": strategy.public(res, label),
+            "text": strategy.report_text(res, f"{n} ({label})", f, prefs.get()["analyst"]["modules"])}
+
+
+@api.get("/setups")
+async def setups(m: str = Query("crypto", alias="market"), style: str | None = None):
+    st = _style(style)
+    return {"style": st, "setups": await engine.setups_list(_kind(m), st)}
 
 
 @api.get("/news")
