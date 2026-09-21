@@ -43,7 +43,8 @@ def defaults():
                      "leads": sorted({x for x in leads if x in LEADS} or {60, 15, 0}, reverse=True)},
         "general": {"timezone": _env_tz(), "tz_offset_min": None},
         "setups": {"enabled": True, "min_conf": 50, "styles": list(STYLES), "markets": list(MARKETS),
-                   "on_zone": True, "scan_seconds": 60},
+                   "on_zone": True, "scan_seconds": 60,
+                   "sound": {"enabled": True, "urgent_from": 85, "high_from": 70, "quiet_below": 50}},
         "analyst": {"style": "intraday", "modules": {m: True for m in MODULES}, "news_scoring": True, "journal": True},
     }
 
@@ -139,6 +140,15 @@ def _clean(p):
                 o["markets"] = ml
         if st.get("scan_seconds") in SCAN_SECONDS:
             o["scan_seconds"] = st["scan_seconds"]
+        sd = st.get("sound")
+        if isinstance(sd, dict):
+            so = {}
+            if isinstance(sd.get("enabled"), bool):
+                so["enabled"] = sd["enabled"]
+            for k in ("urgent_from", "high_from", "quiet_below"):
+                if isinstance(sd.get(k), (int, float)) and not isinstance(sd.get(k), bool):
+                    so[k] = max(0, min(100, int(sd[k])))
+            o["sound"] = so
         out["setups"] = o
     an = p.get("analyst") or {}
     if isinstance(an, dict):

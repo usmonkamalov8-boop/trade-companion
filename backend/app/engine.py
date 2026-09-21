@@ -2,7 +2,7 @@
 briefings and answers chat questions. No paid API, no LLM, no keys."""
 import asyncio, re, time
 from datetime import datetime, timezone
-from . import analytics as A, bot, journal, market, prefs, strategy, tz as TZ, config as C
+from . import analytics as A, backtest, bot, journal, market, prefs, strategy, tz as TZ, config as C
 
 _scan_cache = {}
 DISCLAIMER = "Rule-based analysis of live data. Not financial advice."
@@ -409,6 +409,164 @@ async def calendar_text():
     return "\n".join(L)
 
 
+# ------------------------------------------------------------ heat map, mini charts, backtest
+
+
+def _sentiment(avg):
+    return ("Bullish" if avg >= 25 else "Mildly bullish" if avg >= 10 else "Bearish" if avg <= -25
+            else "Mildly bearish" if avg <= -10 else "Neutral")
+
+
+async def heatmap(style=None):
+    """Bias of every asset on every timeframe (MN to 5m) plus market-wide sentiment, crypto and forex together."""
+    style = style if style in strategy.STYLES else _default_style()
+    names_c, names_f = list(C.CRYPTO), list(C.FOREX)
+    sem = asyncio.Semaphore(4)
+
+    async def one(n):
+        async with sem:
+            try:
+                return n, await analyze(n, style)
+            except Exception:
+                return n, None
+
+    results = dict(await asyncio.gather(*[one(n) for n in names_c + names_f]))
+
+    def market_block(kind, names):
+        rows = []
+        for n in names:
+            res = results.get(n)
+            if not res or res.get("error"):
+                continue
+            base = {"name": n, "label": C.LABELS.get(n, n)}
+            if res.get("closed"):
+                rows.append({**base, "open": False, "market_status": "Closed (Weekend)" if res.get("closed_why") == "weekend" else "No fresh data",
+                             "price_str": A.fmt(res["price"], res["dec"]) if res.get("price") is not None else "-",
+                             "overall": 0, "bias": "Closed", "cells": []})
+                continue
+            cells, overall = strategy.heat_row(res, style)
+            rows.append({**base, "open": True, "market_status": "Open 24/7" if kind == "crypto" else "Open",
+                         "price_str": A.fmt(res["price"], res["dec"]), "overall": overall,
+                         "bias": "Bullish" if overall >= 20 else "Bearish" if overall <= -20 else "Neutral", "cells": cells})
+        open_rows = [r for r in rows if r["open"]]
+        avg = sum(r["overall"] for r in open_rows) / len(open_rows) if open_rows else 0
+        tf_avg = []
+        for i, t in enumerate(strategy.ALL_TFS):
+            vals = [r["cells"][i]["score"] for r in open_rows if r["cells"][i]["score"] is not None]
+            tf_avg.append({"tf": strategy.tfl(t), "avg": int(round(sum(vals) / len(vals))) if vals else None})
+        return {"summary": {"open": len(open_rows), "closed": len(rows) - len(open_rows),
+                            "bullish": sum(1 for r in open_rows if r["bias"] == "Bullish"),
+                            "bearish": sum(1 for r in open_rows if r["bias"] == "Bearish"),
+                            "neutral": sum(1 for r in open_rows if r["bias"] == "Neutral"),
+                            "avg": int(round(avg)), "label": _sentiment(avg) if open_rows else "Closed", "tf_avg": tf_avg},
+                "rows": rows}
+
+    return {"style": style, "tfs": [strategy.tfl(t) for t in strategy.ALL_TFS],
+            "markets": {"crypto": market_block("crypto", names_c), "forex": market_block("forex", names_f)}}
+
+
+async def heatmap_text(style=None):
+    d = await heatmap(style)
+    L = [f"MARKET HEAT MAP - {strategy.STYLES[d['style']]['label']} weighting - {_now()}", "Scores run from -100 (bearish) to +100 (bullish).",
+         "Columns: " + ", ".join(d["tfs"])]
+    for k, title in (("crypto", "CRYPTO"), ("forex", "FOREX AND GOLD")):
+        m = d["markets"][k]
+        sm = m["summary"]
+        L += ["", f"{title}: {sm['label']} (average {sm['avg']:+d}); {sm['bullish']} bullish, {sm['bearish']} bearish, {sm['neutral']} neutral"
+              + (f", {sm['closed']} closed" if sm["closed"] else "")]
+        for r in sorted((r for r in m["rows"] if r["open"]), key=lambda r: -r["overall"]):
+            cells = " ".join(f"{c['score']:+4d}" if c["score"] is not None else "   -" for c in r["cells"])
+            L.append(f"{r['name']:<7}{r['overall']:+4d}  {cells}")
+    L += ["", DISCLAIMER]
+    return "\n".join(L)
+
+
+async def chart_data(name, tf, style=None, n=100):
+    """Candles plus the structure the analyst sees on them (zones, levels, breaks) for the app's mini charts."""
+    style = style if style in strategy.STYLES else _default_style()
+    tf = tf if tf in strategy.ALL_TFS else "1h"
+    n = max(20, min(int(n), 200))
+    kind = "crypto" if name in C.CRYPTO else "forex"
+    tfs = await market.tfs(name, kind, [tf])
+    c = tfs.get(tf)
+    if not c or len(c["c"]) < 5:
+        raise ValueError("no candles for this timeframe")
+    total = len(c["c"])
+    start = max(0, total - n)
+
+    def secs(t):
+        return t / 1000.0 if t > 1e11 else float(t)
+
+    candles = [[secs(c["t"][i]), c["o"][i], c["h"][i], c["l"][i], c["c"][i], c["v"][i]] for i in range(start, total)]
+    a = await asyncio.to_thread(strategy.analyze_tf, c, tf) if total >= 40 else None
+    zones, levels, events = [], [], []
+    if a:
+        for z in a["obs"]:
+            zones.append({"kind": "OB", "dir": z["dir"], "low": z["low"], "high": z["high"], "x": max(0, z["idx"] - start), "fresh": z["fresh"]})
+        for z in a["fvgs"]:
+            zones.append({"kind": "FVG", "dir": z["dir"], "low": z["low"], "high": z["high"], "x": max(0, z["idx"] - start), "fresh": z["fresh"]})
+        for z in a["sd"]:
+            zones.append({"kind": z["type"], "dir": z["dir"], "low": z["low"], "high": z["high"], "x": max(0, z["idx"] - start), "fresh": z["fresh"]})
+        vp = a.get("vp")
+        if vp:
+            levels += [{"label": "POC", "price": vp["poc"], "kind": "vp"}, {"label": "VAH", "price": vp["vah"], "kind": "vp2"},
+                       {"label": "VAL", "price": vp["val"], "kind": "vp2"}]
+        for ev in a["events"]:
+            if ev["idx"] >= start:
+                events.append({"type": ev["type"], "dir": ev["dir"], "x": ev["idx"] - start, "level": ev["level"]})
+    closed = False
+    try:
+        res = await analyze(name, style)
+        closed = bool(res.get("closed"))
+        s = res.get("setup") or {}
+        if not closed and s.get("poi") and s.get("zone"):
+            zones.append({"kind": "ENTRY", "dir": 1 if s["direction"] == "long" else -1, "low": s["zone"]["low"],
+                          "high": s["zone"]["high"], "x": 0, "fresh": True})
+            levels += [{"label": "Stop", "price": s["stop"], "kind": "stop"}, {"label": "TP1", "price": s["tp1"]["price"], "kind": "tp"},
+                       {"label": "TP2", "price": s["tp2"]["price"], "kind": "tp"}]
+    except Exception:
+        pass
+    dec = None if kind == "crypto" else C.FOREX[name][1]
+    return {"name": name, "tf": strategy.tfl(tf), "key": tf, "n": len(candles), "closed": closed, "dec": dec,
+            "price": candles[-1][4], "candles": candles, "zones": zones, "levels": levels, "events": events}
+
+
+def backtest_text(name=None):
+    job = backtest.latest()
+    if not job:
+        return ("No backtest has been run yet. Start one in the app: Markets > Backtest (it replays the last 30-180 days "
+                "and takes a few minutes), or say \"run backtest\".")
+    p = job["params"]
+    head = f"BACKTEST - {strategy.STYLES[p['style']]['label']}, last {p['days']} days, fees {p['fee_bp'] + p['slip_bp']:.0f} bp per side"
+    if job["status"] == "running":
+        pr = job["progress"]
+        return f"{head}\nRunning: {pr['pct']}% ({pr.get('current') or '-'}, {pr['done']}/{pr['total']} assets). Check again in a few minutes."
+    if job["status"] != "done":
+        return f"{head}\nStatus: {job['status']}" + (f" ({job.get('error')})" if job.get("error") else "")
+
+    def line(lab, s):
+        if not s or not s["filled"]:
+            return f"{lab}: no filled setups"
+        return (f"{lab}: {s['filled']} trades, win rate {s['win_rate']:.0f}%, average {s['avg_net_r']:+.2f}R after costs, "
+                f"total {s['total_net_r']:+.1f}R, profit factor {s['profit_factor'] or 0:.2f}, max drawdown {s['max_dd_r']:.1f}R")
+
+    L = [head, ""]
+    if name and name in job["assets"] and "all" in job["assets"][name]:
+        r = job["assets"][name]
+        L += [f"{name}", line("All setups", r["all"]), line("Order block / FVG zones", r["ob_fvg"]),
+              line("OB + FVG + volume profile", r["ob_fvg_volume"])]
+        L += ["By confidence: " + "; ".join(f"{b['label']}: {b['filled']} trades, {b['win_rate']:.0f}% wins" for b in r["by_conf"] if b["filled"])]
+    else:
+        o = job["overall"]
+        L += [line("All assets, all setups", o["all"]), line("Order block / FVG zones", o["ob_fvg"]),
+              line("OB + FVG + volume profile", o["ob_fvg_volume"]), "", "By asset (net R):"]
+        L += [f"- {a['name']}: {a['filled']} trades, {a['win_rate'] or 0:.0f}% wins, {a['total_net_r']:+.1f}R" for a in job.get("by_asset", [])]
+        L += ["", "By confidence: " + "; ".join(f"{b['label']}: {b['filled']} trades, {b['win_rate']:.0f}% wins, {b['avg_net_r']:+.2f}R" for b in o["by_conf"] if b["filled"])]
+    L += ["", "Replay of the same rules with no look-ahead; a win is TP1 before the stop; fees and slippage included; news, funding and partial exits are not modelled. "
+          "Past results do not predict future results.", DISCLAIMER]
+    return "\n".join(L)
+
+
 # ------------------------------------------------- multi-strategy analysis (strategy.py)
 
 _an_cache = {}
@@ -712,6 +870,19 @@ async def answer(question, history=None):
                 f"Weekly forex and gold hours in your time: {TZ.market_hours()} (Friday 17:00 to Sunday 17:00 New York). "
                 "No signals are produced while closed.\n"
                 f"Kill zones today ({TZ.label_now()}): " + "; ".join(f"{w['name']} {w['start']}-{w['end']}" for w in TZ.sessions()))
+    if _has(ql, "heatmap", "heat map", "market sentiment", "sentiment map"):
+        return await heatmap_text(_style_of(ql))
+    if _has(ql, "backtest", "back-test", "back test"):
+        if _has(ql, "run", "start", "launch"):
+            try:
+                days = next((int(x) for x in re.findall(r"\b(\d{2,3})\b", ql) if 7 <= int(x) <= 180), 90)
+                job = backtest.start(days, _style_of(ql) or _default_style())
+                return (f"Backtest started: {job['params']['style']} style, last {days} days, {len(job['params']['assets'])} crypto assets. "
+                        "It runs in the background for several minutes. Ask \"backtest results\" or open Markets > Backtest.")
+            except Exception as ex:
+                return f"Could not start the backtest: {ex}"
+        found = find_assets(q)
+        return backtest_text(found[0] if found and found[0] in C.CRYPTO else None)
     if _has(ql, "screener", "scanner", "scan all", "scan everything", "scan the market", "scan markets"):
         return await screener_text("crypto" if _has(ql, "crypto") else ("forex" if _has(ql, "forex", "fx") else None), _style_of(ql))
     assets = find_assets(q)

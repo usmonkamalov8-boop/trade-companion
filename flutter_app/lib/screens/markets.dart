@@ -2,34 +2,42 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../api.dart';
+import '../minichart.dart';
 import '../prefs.dart';
 import '../theme.dart';
+import 'backtest.dart';
+import 'detail_sheet.dart';
+import 'heatmap.dart';
 import 'settings.dart' show styleLabels;
 
 class MarketsPage extends StatelessWidget {
   const MarketsPage({super.key});
   @override
   Widget build(BuildContext context) => DefaultTabController(
-        length: 6,
+        length: 8,
         child: Scaffold(
           appBar: AppBar(
             title: const Text('Markets'),
             bottom: const TabBar(isScrollable: true, tabs: [
-              Tab(text: 'Crypto'),
-              Tab(text: 'Forex and gold'),
               Tab(text: 'Screener'),
+              Tab(text: 'Heatmap'),
               Tab(text: 'Journal'),
+              Tab(text: 'Backtest'),
               Tab(text: 'Calendar'),
               Tab(text: 'News'),
+              Tab(text: 'Crypto'),
+              Tab(text: 'Forex and gold'),
             ]),
           ),
           body: const TabBarView(children: [
-            MarketView('crypto'),
-            MarketView('forex'),
             SetupsView(),
+            HeatmapView(),
             JournalView(),
+            BacktestView(),
             CalendarView(),
             NewsView(),
+            MarketView('crypto'),
+            MarketView('forex'),
           ]),
         ),
       );
@@ -254,6 +262,7 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
   String style = 'intraday';
   String view = 'list';
   String filter = 'all';
+  String? openChart;
   List rows = [];
   Map<String, dynamic> summary = {};
   Map<String, dynamic> mstatus = {};
@@ -355,15 +364,26 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
     final dir = '${r['direction']}';
     final vp = r['vp'] as Map<String, dynamic>?;
     final nearest = z['nearest'];
+    final spark = ((r['spark'] as List?) ?? []).map((e) => (e as num).toDouble()).toList();
+    final name = '${r['name']}';
+    final expanded = openChart == name;
+    final setupTf = style == 'scalp' ? '15m' : (style == 'swing' ? '1d' : '1h');
     return Panel(
       child: InkWell(
-        onTap: () => _detail(index),
+        onTap: () => setState(() => openChart = expanded ? null : name),
+        onLongPress: () => _detail(index),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
             Expanded(
-              child: Text('${r['name']}  ${r['label']}', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15)),
+              child: Text('$name  ${r['label']}', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15)),
             ),
+            if (spark.length > 3 && open)
+              Padding(
+                padding: const EdgeInsets.only(right: 10),
+                child: Sparkline(values: spark, color: spark.last >= spark.first ? p.gain : p.loss),
+              ),
             Text('${r['price_str']}', style: numStyle.copyWith(color: p.muted)),
+            Icon(expanded ? Icons.expand_less : Icons.expand_more, size: 18, color: p.muted),
           ]),
           const SizedBox(height: 6),
           Wrap(runSpacing: 4, children: [
@@ -389,6 +409,15 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: Text('Reopens ${r['reopen']}. No signals while closed.', style: TextStyle(color: p.muted, fontSize: 12)),
+            ),
+          if (expanded)
+            MiniChartPanel(
+              key: ValueKey('mc-$name-$style'),
+              name: name,
+              style: style,
+              initialTf: setupTf,
+              onReport: () => _detail(index),
+              onXray: () => _detail(index, focus: 'xray'),
             ),
         ]),
       ),
@@ -567,18 +596,8 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
   }
 
   void _detail(int index, {String focus = ''}) {
-    final p = context.pal;
     final list = visible.map((r) => {'name': '${(r as Map)['name']}', 'label': '${r['label']}'}).toList();
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: p.surface,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (_) => FractionallySizedBox(
-        heightFactor: 0.92,
-        child: _DetailSheet(items: list, start: index, style: style, initialFocus: focus),
-      ),
-    );
+    showAnalysisSheet(context, list, index, style, focus: focus);
   }
 
   @override
@@ -670,123 +689,12 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
             view == 'list' ? _srow(p, list[i] as Map<String, dynamic>, i) : _card(p, list[i] as Map<String, dynamic>, i),
           const SizedBox(height: 8),
           Text(
-            'Tap an asset for the full multi-timeframe report and use the arrows to move to the next one. '
-            'Rule-based analysis, not financial advice.',
+            'Tap an asset to open its chart with the analyst\'s zones, levels and BOS / CHoCH; long-press for the full '
+            'report (arrows move to the next asset). Rule-based analysis, not financial advice.',
             style: TextStyle(color: p.muted, fontSize: 12, height: 1.4),
           ),
         ],
       ),
-    );
-  }
-}
-
-class _DetailSheet extends StatefulWidget {
-  final List<Map<String, String>> items;
-  final int start;
-  final String style, initialFocus;
-  const _DetailSheet({required this.items, required this.start, required this.style, this.initialFocus = ''});
-  @override
-  State<_DetailSheet> createState() => _DetailSheetState();
-}
-
-class _DetailSheetState extends State<_DetailSheet> {
-  static const focuses = {
-    '': 'Full report',
-    'xray': 'Trade X-Ray',
-    'topdown': 'Top-down (all TFs)',
-    'structure': 'BOS / CHoCH',
-    'ob': 'Order blocks',
-    'fvg': 'Fair value gaps',
-    'sd': 'Supply / demand',
-    'sr': 'Support / resistance',
-    'fib': 'Fibonacci',
-    'trend': 'Trendlines',
-    'liquidity': 'Liquidity',
-    'volume': 'Volume profile',
-    'ict': 'ICT',
-    'poi': 'POI and setup',
-  };
-  String focus = '';
-  int idx = 0;
-  String? text;
-  String? err;
-  int req = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    focus = widget.initialFocus;
-    idx = widget.start.clamp(0, widget.items.length - 1).toInt();
-    _load();
-  }
-
-  Future<void> _load() async {
-    final my = ++req;
-    setState(() {
-      text = null;
-      err = null;
-    });
-    try {
-      final d = await Api.get('/api/analysis', {'name': widget.items[idx]['name']!, 'style': widget.style, if (focus.isNotEmpty) 'focus': focus})
-          as Map<String, dynamic>;
-      if (mounted && my == req) setState(() => text = '${d['text']}');
-    } catch (e) {
-      if (mounted && my == req) setState(() => err = '$e');
-    }
-  }
-
-  void _go(int d) {
-    idx = (idx + d).clamp(0, widget.items.length - 1).toInt();
-    _load();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final p = context.pal;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          IconButton(onPressed: idx > 0 ? () => _go(-1) : null, icon: const Icon(Icons.chevron_left)),
-          Expanded(
-            child: Text(
-              '${widget.items[idx]['name']}  ${widget.items[idx]['label']}  -  ${styleLabels[widget.style] ?? ''}   (${idx + 1}/${widget.items.length})',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
-            ),
-          ),
-          IconButton(onPressed: idx < widget.items.length - 1 ? () => _go(1) : null, icon: const Icon(Icons.chevron_right)),
-          IconButton(onPressed: () => Navigator.of(context).pop(), icon: const Icon(Icons.close)),
-        ]),
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: Row(children: [
-            for (final e in focuses.entries)
-              Padding(
-                padding: const EdgeInsets.only(right: 6),
-                child: ChoiceChip(
-                  label: Text(e.value),
-                  selected: focus == e.key,
-                  onSelected: (_) {
-                    focus = e.key;
-                    _load();
-                  },
-                ),
-              ),
-          ]),
-        ),
-        const SizedBox(height: 8),
-        Expanded(
-          child: err != null
-              ? Text(err!, style: TextStyle(color: p.loss))
-              : (text == null
-                  ? const Center(child: CircularProgressIndicator())
-                  : SingleChildScrollView(
-                      child: SelectableText(text!, style: numStyle.copyWith(fontSize: 12.8, height: 1.5)),
-                    )),
-        ),
-      ]),
     );
   }
 }

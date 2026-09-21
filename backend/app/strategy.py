@@ -517,6 +517,7 @@ def analyze_tf(c, tf):
             vr = (sum(v[-4:-1]) / 3.0) / base_v        # last 3 closed bars against the previous 30
     return {
         "vp": volume_profile(c, VP_BARS.get(tf, 150)),
+        "spark": [float(f"{x:.8g}") for x in c["c"][-48:]],
         "rsi": rs[-1], "macd": A.macd_hist(c["c"]), "div": divergence(alt, rs, n), "vol_ratio": vr,
         "tf": tf, "n": n, "price": px, "atr": a, "atr_pct": a / px * 100, "atr_ratio": a / (sum(win) / len(win)),
         "trend": trend, "trend_label": label if sw else ("structure " + ("up" if st["trend"] == 1 else "down" if st["trend"] == -1 else "flat")),
@@ -1189,6 +1190,36 @@ def _zone_info(z, px, fmt):
     return {"dir": z["dir"], "name": d, "zone": txt, "state": state, "dist": abs(mid - px)}
 
 
+def tf_score(a):
+    """-100 .. +100 sentiment of one timeframe: structure trend, a fresh break of structure, and RSI tilt."""
+    sc = a["trend"] * 50
+    ev = a["last_event"]
+    if ev and a["n"] - 1 - ev["idx"] <= 12:
+        sc += ev["dir"] * 25          # a fresh break confirms (or, against the trend, weakens) the trend
+    r = a.get("rsi")
+    if r is not None:
+        sc += max(-15, min(15, (r - 50) * 0.5))
+    return int(max(-100, min(100, round(sc))))
+
+
+def heat_row(res, style):
+    """One heat map row: a score for every timeframe and a weighted overall score."""
+    allp = res.get("_all") or {}
+    w = TD_W[style]
+    cells, num, den = [], 0.0, 0.0
+    for t in ALL_TFS:
+        a = allp.get(t)
+        if not a:
+            cells.append({"tf": tfl(t), "score": None, "trend": 0})
+            continue
+        sc = tf_score(a)
+        cells.append({"tf": tfl(t), "score": sc, "trend": a["trend"]})
+        num += w.get(t, 0.0) * sc
+        den += w.get(t, 0.0)
+    overall = int(round(num / den)) if den else 0
+    return cells, overall
+
+
 def tf_summary(a, fmt):
     """Structure facts of one timeframe: trend, last BOS / CHoCH, nearest order blocks and FVGs."""
     px = a["price"]
@@ -1506,6 +1537,8 @@ def public(res, label):
             tag = ", ".join(roles.get(t, [])) or ("micro entry" if t == "5m" else "")
             out["tf"].append({**m, "role": tag})
     sp = per.get("setup")
+    if sp and sp.get("spark"):
+        out["spark"], out["spark_tf"] = sp["spark"], tfl(sp["tf"])
     vp = sp.get("vp") if sp else None
     if vp:
         out["vp"] = {"tf": tfl(sp["tf"]), "window": VP_LABEL[sp["tf"]], "poc": fmt(vp["poc"]), "vah": fmt(vp["vah"]),

@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from . import bot, econ, engine, events, journal, market, prefs, push, strategy, tz, watcher, config as C
+from . import backtest, bot, econ, engine, events, journal, market, prefs, push, strategy, tz, watcher, config as C
 
 
 @asynccontextmanager
@@ -163,9 +163,10 @@ async def push_info():
 
 
 @api.post("/push/test")
-async def push_test():
+async def push_test(priority: int = Query(3, ge=1, le=5)):
+    """Send a test push at a given ntfy priority (1-5) so each level can be given its own sound."""
     try:
-        await push.send_test()
+        await push.send_test(priority)
     except Exception as e:
         raise HTTPException(502, f"Push failed: {e}")
     return {"ok": True}
@@ -288,6 +289,56 @@ async def analysis(name: str, style: str | None = None, focus: str | None = None
 async def screener(m: str = Query("crypto", alias="market"), style: str | None = None):
     """One row per asset: open/closed, bias, active zones, setup status and volume profile."""
     return await engine.screener(_kind(m), _style(style))
+
+
+@api.get("/heatmap")
+async def heatmap(style: str | None = None):
+    """Bias score of every asset on every timeframe, plus crypto and forex sentiment summaries."""
+    return await engine.heatmap(_style(style))
+
+
+@api.get("/chart")
+async def chart(name: str, tf: str = "1h", n: int = Query(100, ge=20, le=200), style: str | None = None):
+    """Candles and the analyst's structure (zones, levels, BOS/CHoCH) for one asset and timeframe."""
+    nm = _asset(name)
+    try:
+        return await engine.chart_data(nm, tf, _style(style), n)
+    except ValueError as ex:
+        raise HTTPException(502, str(ex))
+
+
+class BacktestIn(BaseModel):
+    days: int = 90
+    style: str = "intraday"
+    assets: list[str] | None = None
+    fee_bp: float = 5.0
+    slip_bp: float = 2.0
+    min_conf: int = 0
+
+
+@api.post("/backtest/start")
+async def backtest_start(b: BacktestIn):
+    try:
+        return backtest.start(b.days, b.style, [a.upper() for a in b.assets] if b.assets else None, b.fee_bp, b.slip_bp, b.min_conf)
+    except RuntimeError as ex:
+        raise HTTPException(409, str(ex))
+    except ValueError as ex:
+        raise HTTPException(400, str(ex))
+
+
+@api.get("/backtest/status")
+async def backtest_status():
+    return backtest.latest() or {"status": "none"}
+
+
+@api.post("/backtest/cancel")
+async def backtest_cancel():
+    return backtest.cancel() or {"status": "none"}
+
+
+@api.get("/backtest/runs")
+async def backtest_runs():
+    return {"runs": backtest.runs()}
 
 
 @api.get("/journal")

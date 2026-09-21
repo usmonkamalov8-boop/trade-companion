@@ -283,6 +283,25 @@ class _NotificationsPageState extends State<NotificationsPage> {
     }
   }
 
+  Future<void> _testLevel(int level) async {
+    try {
+      await Api.post('/api/push/test?priority=$level');
+      if (mounted) {
+        setState(() {
+          ok = true;
+          msg = 'Test push sent at level $level. Close the app to hear the ntfy sound.';
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          ok = false;
+          msg = '$e';
+        });
+      }
+    }
+  }
+
   Future<void> _testSetup() async {
     try {
       await Api.post('/api/setups/test');
@@ -325,6 +344,7 @@ class _NotificationsPageState extends State<NotificationsPage> {
           final kinds = (push['kinds'] as Map?)?.cast<String, dynamic>() ?? {};
           final pushOn = push['enabled'] == true;
           final setupsCfg = ServerPrefs.I.section('setups');
+          final soundCfg = (setupsCfg['sound'] as Map?)?.cast<String, dynamic>() ?? {};
           final setupStyles = ((setupsCfg['styles'] as List?) ?? ['scalp', 'intraday', 'swing']).map((e) => '$e').toList();
           final setupMarkets = ((setupsCfg['markets'] as List?) ?? ['crypto', 'forex']).map((e) => '$e').toList();
           final topic = info != null && info!['topic'] != null ? '${info!['topic']}' : '';
@@ -443,6 +463,63 @@ class _NotificationsPageState extends State<NotificationsPage> {
                     onPressed: _testSetup,
                     icon: const Icon(Icons.notifications_active_outlined, size: 18),
                     label: const Text('Send a test setup alert'),
+                  ),
+                ),
+              ]),
+            ),
+            const Heading('Alert loudness by confidence'),
+            Panel(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                SwitchListTile(
+                  title: const Text('Louder alerts for stronger setups'),
+                  subtitle: Text('Sets the ntfy priority of a setup push from its confidence',
+                      style: TextStyle(color: p.muted, fontSize: 12.5)),
+                  value: soundCfg['enabled'] != false,
+                  onChanged: (v) => ServerPrefs.I.update({'setups': {'sound': {'enabled': v}}}),
+                ),
+                for (final row in [
+                  ['urgent_from', 'Urgent (loudest) from confidence', '85', '75,80,85,90,95'],
+                  ['high_from', 'High from confidence', '70', '55,60,65,70,75'],
+                  ['quiet_below', 'Quiet (silent-ish) below confidence', '50', '30,40,50,60'],
+                ])
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text('${row[1]}: ${soundCfg[row[0]] ?? row[2]}', style: TextStyle(color: p.muted, fontSize: 12.5)),
+                      Wrap(spacing: 8, children: [
+                        for (final v in row[3].split(',').map(int.parse))
+                          ChoiceChip(
+                            label: Text('$v'),
+                            selected: ((soundCfg[row[0]] as num?)?.toInt() ?? int.parse(row[2])) == v,
+                            onSelected: (_) => ServerPrefs.I.update({'setups': {'sound': {row[0]: v}}}),
+                          ),
+                      ]),
+                    ]),
+                  ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                  child: Text('Send a test at each level and give each its own sound:', style: TextStyle(color: p.muted, fontSize: 12.5)),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: Wrap(spacing: 8, runSpacing: 4, children: [
+                    for (final t in const [
+                      [2, 'Quiet'],
+                      [3, 'Normal'],
+                      [4, 'High'],
+                      [5, 'Urgent'],
+                    ])
+                      OutlinedButton(onPressed: () => _testLevel(t[0] as int), child: Text('${t[1]} (${t[0]})')),
+                  ]),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+                  child: Text(
+                    'The ntfy app makes one Android notification channel per level. To hear the difference: Android Settings > '
+                    'Apps > ntfy > Notifications, open each priority channel and pick a different sound. For Urgent also allow '
+                    '"Override Do Not Disturb". The server chooses the level; the sound itself is set on the phone.',
+                    style: TextStyle(color: p.muted, fontSize: 12, height: 1.4),
                   ),
                 ),
               ]),

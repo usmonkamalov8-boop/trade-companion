@@ -25,6 +25,8 @@ class _ChatPageState extends State<ChatPage> {
     'Why is gold confidence low?',
     'Journal stats',
     'Screener',
+    'Market heatmap',
+    'Backtest results',
     'Volume profile BTC',
     'Is forex open?',
     'Fib and premium discount EURUSD',

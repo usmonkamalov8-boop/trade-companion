@@ -40,6 +40,22 @@ def should_push(e, c):
     return bool(c["kinds"].get(e["kind"], False)) or e["level"] == "error"
 
 
+def setup_priority(e, c=None):
+    """ntfy priority (1-5) for a setup alert from its confidence: 5 = urgent (loudest, can break through Do Not
+    Disturb), 4 = high, 3 = default, 2 = quiet. Each level has its own Android notification channel in the ntfy app,
+    so it can have its own sound. READY alerts are at least high."""
+    import re
+    s = prefs.get()["setups"]["sound"]
+    m = re.search(r"(?:confidence |, )(\d{1,3})\b", e["title"])
+    prio = 3
+    if s.get("enabled", True) and m:
+        conf = int(m.group(1))
+        prio = 5 if conf >= s["urgent_from"] else 4 if conf >= s["high_from"] else 3 if conf >= s["quiet_below"] else 2
+    if e.get("level") == "success":
+        prio = max(prio, 4)
+    return prio
+
+
 def build(e, c):
     title, text = e["title"], e.get("text") or ""
     low = e["title"].lower()
@@ -56,9 +72,9 @@ def build(e, c):
     if e["kind"] == "news":
         tags = ["newspaper", "warning"]
     elif e["kind"] == "setup":
-        tags = ["chart_with_downwards_trend" if " SHORT" in e["title"] else "chart_with_upwards_trend"]
-        if e["level"] == "success":          # READY: price in the zone with confirmation
-            prio = 4
+        trend = "chart_with_downwards_trend" if " SHORT" in e["title"] else "chart_with_upwards_trend"
+        prio = setup_priority(e, c)
+        tags = (["rotating_light", trend] if prio == 5 else ["star", trend] if prio == 4 else [trend])
     elif "halted" in low:
         tags = ["octagonal_sign"]
     elif "resumed" in low:
@@ -76,13 +92,15 @@ async def _post(body, c):
         raise RuntimeError(f"ntfy {r.status_code}: {r.text[:120]}")
 
 
-async def send_test():
+async def send_test(priority=3):
     c = cfg()
     if not c["topic"]:
         raise RuntimeError("Push is not configured (set NTFY_TOPIC in backend/.env)")
-    await _post({"topic": c["topic"], "title": "Trade Companion test",
-                 "message": "If you see this with the app closed, background push works.",
-                 "priority": 3, "tags": ["white_check_mark"]}, c)
+    priority = max(1, min(5, int(priority)))
+    names = {1: "minimum", 2: "quiet", 3: "normal", 4: "high", 5: "URGENT"}
+    await _post({"topic": c["topic"], "title": f"Trade Companion test: {names[priority]} alert",
+                 "message": f"Priority {priority}. Give this level its own sound in the ntfy app (Android notification channel).",
+                 "priority": priority, "tags": ["white_check_mark"]}, c)
 
 
 def _load_last():

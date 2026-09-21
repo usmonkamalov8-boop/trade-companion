@@ -98,6 +98,7 @@ def advance(r, c, dur, now):
     mfe, mae = r["mfe_r"] or 0.0, r["mae_r"] or 0.0
     checked = r["checked_ts"]
     last_close = c["c"][-1] if c["c"] else None
+    prev_px = None
 
     def close(res_, at, rr):
         nonlocal state, result, closed_ts, r_res
@@ -108,6 +109,12 @@ def advance(r, c, dur, now):
         if t < r["ts"] or (checked is not None and t <= checked):
             continue
         if state == "closed":
+            break
+        if state == "pending" and t > r["expires_ts"]:      # never fill a setup after it has expired
+            close("expired", r["expires_ts"], None)
+            break
+        if state == "active" and t - act > MAX_OPEN[r["style"]]:
+            close("timeout", t, s * (prev_px - entry) / risk if prev_px is not None else 0.0)
             break
         hi, lo = c["h"][i], c["l"][i]
         is_closed = t + dur <= now
@@ -129,6 +136,7 @@ def advance(r, c, dur, now):
                 close("loss", t, -1.0)
             elif tp_hit and t > act:
                 close("win", t, s * (tp1 - entry) / risk)
+        prev_px = c["c"][i]
         if is_closed:
             checked = t
         if state == "closed":
@@ -304,7 +312,7 @@ def _alert(res, update=False):
     stg = s["strings"]
     d = "LONG" if s["direction"] == "long" else "SHORT"
     if update:
-        title = f"Setup update: {res['name']} {d} ({res['style']}) - {s['status']}"
+        title = f"Setup update: {res['name']} {d} ({res['style']}, confidence {s['confidence']}) - {s['status']}"
     else:
         title = f"New {res['style']} setup: {res['name']} {d} (confidence {s['confidence']})"
     text = (f"Zone {stg['entry']}, stop {stg['stop']}, TP1 {stg['tp1']} ({s['risk']['rr1']:.1f}R). "

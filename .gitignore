@@ -1,0 +1,13 @@
+# private data: never commit (added by the Trade Companion installer)
+backend/.env
+backend/*.db
+backend/*.db-*
+backend/prefs.json
+backend/control.json
+backend/*_state.json
+backend/*_cache.json
+backend/calendar_sent.json
+backend/backtests/
+backend/venv/
+**/__pycache__/
+*.pyc
