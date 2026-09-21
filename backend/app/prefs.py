@@ -4,13 +4,28 @@ import copy, json, os, time
 from . import config as C
 
 FILE = C.BASE / "prefs.json"
-KINDS = ["position", "trade", "command", "service", "warning", "news", "risk", "profile", "system"]
+KINDS = ["position", "trade", "command", "service", "warning", "news", "setup", "risk", "profile", "system"]
 CURRENCIES = ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD"]
 MODULES = ["structure", "ob", "fvg", "sd", "sr", "fib", "trend", "liquidity", "volume", "ict", "poi"]
 STYLES = ["scalp", "intraday", "swing"]
 LEADS = [0, 5, 15, 30, 60, 120]
+MARKETS = ["crypto", "forex"]
+SCAN_SECONDS = [60, 120, 300]
 
 _cache = {"mtime": None, "data": None}
+
+
+def _env_tz():
+    """CAL_TZ from .env (older installs) becomes the starting time zone; otherwise follow the phone."""
+    z = os.getenv("CAL_TZ", "").strip()
+    if z and z.upper() != "UTC":
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo(z)
+            return z
+        except Exception:
+            pass
+    return "auto"
 
 
 def defaults():
@@ -21,11 +36,14 @@ def defaults():
     return {
         "push": {"enabled": os.getenv("PUSH_ENABLED", "1").strip() != "0",
                  "detail": "minimal" if os.getenv("PUSH_DETAIL", "full").strip().lower() == "minimal" else "full",
-                 "kinds": {k: k in on for k in KINDS}},
+                 "kinds": {k: (k in on or k == "setup") for k in KINDS}},
         "calendar": {"alerts": os.getenv("CAL_ALERTS", "1").strip() != "0",
                      "impact": "medium" if imp == "medium" else "high",
                      "currencies": [c for c in cur if c in CURRENCIES] or ["USD", "EUR", "GBP", "JPY"],
                      "leads": sorted({x for x in leads if x in LEADS} or {60, 15, 0}, reverse=True)},
+        "general": {"timezone": _env_tz(), "tz_offset_min": None},
+        "setups": {"enabled": True, "min_conf": 50, "styles": list(STYLES), "markets": list(MARKETS),
+                   "on_zone": True, "scan_seconds": 60},
         "analyst": {"style": "intraday", "modules": {m: True for m in MODULES}, "news_scoring": True, "journal": True},
     }
 
@@ -85,6 +103,43 @@ def _clean(p):
             if ld:
                 o["leads"] = ld
         out["calendar"] = o
+    gen = p.get("general") or {}
+    if isinstance(gen, dict):
+        o = {}
+        tzn = gen.get("timezone")
+        if isinstance(tzn, str) and 0 < len(tzn) < 64:
+            if tzn == "auto":
+                o["timezone"] = "auto"
+            else:
+                try:
+                    from zoneinfo import ZoneInfo
+                    ZoneInfo(tzn)
+                    o["timezone"] = tzn
+                except Exception:
+                    pass
+        off = gen.get("tz_offset_min")
+        if isinstance(off, (int, float)) and not isinstance(off, bool) and -840 <= int(off) <= 840:
+            o["tz_offset_min"] = int(off)
+        out["general"] = o
+    st = p.get("setups") or {}
+    if isinstance(st, dict):
+        o = {}
+        for k in ("enabled", "on_zone"):
+            if isinstance(st.get(k), bool):
+                o[k] = st[k]
+        if isinstance(st.get("min_conf"), (int, float)) and not isinstance(st.get("min_conf"), bool):
+            o["min_conf"] = max(0, min(100, int(st["min_conf"])))
+        if isinstance(st.get("styles"), list):
+            sl = [x for x in STYLES if x in st["styles"]]
+            if sl:
+                o["styles"] = sl
+        if isinstance(st.get("markets"), list):
+            ml = [x for x in MARKETS if x in st["markets"]]
+            if ml:
+                o["markets"] = ml
+        if st.get("scan_seconds") in SCAN_SECONDS:
+            o["scan_seconds"] = st["scan_seconds"]
+        out["setups"] = o
     an = p.get("analyst") or {}
     if isinstance(an, dict):
         o = {}

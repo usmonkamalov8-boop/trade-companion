@@ -1042,6 +1042,7 @@ class _CalendarViewState extends State<CalendarView> with AutomaticKeepAliveClie
   String? err;
   String? feedErr;
   String? source;
+  String tzLabel = '';
   String? notice;
   double updated = 0;
   bool loading = false;
@@ -1074,10 +1075,7 @@ class _CalendarViewState extends State<CalendarView> with AutomaticKeepAliveClie
 
   String _two(int n) => n.toString().padLeft(2, '0');
 
-  String _clock(double ts) {
-    final d = DateTime.fromMillisecondsSinceEpoch((ts * 1000).round());
-    return '${_two(d.hour)}:${_two(d.minute)}';
-  }
+  String _clock(double ts) => TzClock.hm(ts);
 
   String _in(double ts) {
     final m = ((ts * 1000 - DateTime.now().millisecondsSinceEpoch) / 60000).round();
@@ -1119,6 +1117,7 @@ class _CalendarViewState extends State<CalendarView> with AutomaticKeepAliveClie
           items = d['events'] as List;
           feedErr = d['error'] as String?;
           source = d['source'] as String?;
+          tzLabel = '${d['tz'] ?? ''}';
           updated = (d['updated'] as num?)?.toDouble() ?? 0;
           cur = (d['currencies'] as List?) ?? [];
           loaded = true;
@@ -1187,7 +1186,7 @@ class _CalendarViewState extends State<CalendarView> with AutomaticKeepAliveClie
             const SizedBox(height: 4),
             Text('${next['currency']}  ${next['title']}', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15.5)),
             const SizedBox(height: 2),
-            Text('${_clock(ts)} your time${aff.isEmpty ? '' : '  -  affects $aff'}',
+            Text('${next['local_time'] ?? _clock(ts)} $tzLabel${aff.isEmpty ? '' : '  -  affects $aff'}',
                 style: TextStyle(color: p.muted, fontSize: 12.5)),
           ]),
         ),
@@ -1220,7 +1219,7 @@ class _CalendarViewState extends State<CalendarView> with AutomaticKeepAliveClie
           SizedBox(
             width: 52,
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('${_two(d.hour)}:${_two(d.minute)}', style: numStyle.copyWith(fontWeight: FontWeight.w700)),
+              Text('${e['local_time'] ?? '${_two(d.hour)}:${_two(d.minute)}'}', style: numStyle.copyWith(fontWeight: FontWeight.w700)),
               const SizedBox(height: 4),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
@@ -1269,8 +1268,8 @@ class _CalendarViewState extends State<CalendarView> with AutomaticKeepAliveClie
     for (final raw in items) {
       final e = raw as Map<String, dynamic>;
       final ts = (e['ts'] as num).toDouble();
-      final d = DateTime.fromMillisecondsSinceEpoch((ts * 1000).round());
-      final day = '${_days[d.weekday - 1]} ${d.day} ${_months[d.month - 1]}';
+      final d = TzClock.dt(ts);
+      final day = '${e['local_day'] ?? '${_days[d.weekday - 1]} ${d.day} ${_months[d.month - 1]}'}';
       if (day != lastDay) {
         lastDay = day;
         rows.add(Heading(day));
@@ -1317,7 +1316,7 @@ class _CalendarViewState extends State<CalendarView> with AutomaticKeepAliveClie
           if (notice != null)
             Padding(padding: const EdgeInsets.only(top: 8), child: Text(notice!, style: TextStyle(color: p.gain, fontSize: 12.5))),
           const SizedBox(height: 6),
-          Text('Tracking ${cur.isEmpty ? 'USD, EUR, GBP, JPY' : cur.join(', ')}. Gold follows USD. Times use your phone time zone.',
+          Text('Tracking ${cur.isEmpty ? 'USD, EUR, GBP, JPY' : cur.join(', ')}. Gold follows USD. Times are in $tzLabel (change it in Settings > Time zone).',
               style: TextStyle(color: p.muted, fontSize: 12)),
           if (loading) const Padding(padding: EdgeInsets.only(top: 6), child: LinearProgressIndicator()),
           if (err != null)

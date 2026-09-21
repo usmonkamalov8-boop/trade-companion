@@ -7,7 +7,7 @@ log (kind "news"); the push dispatcher forwards them to your phone even when the
 import asyncio, json, os, time
 from datetime import datetime, timedelta, timezone
 import httpx
-from . import events, prefs, config as C
+from . import events, prefs, tz as TZ, config as C
 
 FF_URLS = ["https://nfs.faireconomy.media/ff_calendar_thisweek.json",
            "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json"]
@@ -48,19 +48,12 @@ def cfg():
         "cur": set(p["currencies"]),
         "leads": sorted(set(p["leads"]), reverse=True) or [60, 15, 0],
         "alerts": p["alerts"],
-        "tz": os.getenv("CAL_TZ", "UTC").strip() or "UTC",
     }
 
 
-def local(ts, tzname):
-    """Local wall-clock time and a 'UTC+4' label for a unix timestamp."""
-    try:
-        from zoneinfo import ZoneInfo
-        d = datetime.fromtimestamp(ts, ZoneInfo(tzname))
-    except Exception:
-        d = datetime.fromtimestamp(ts, timezone.utc)
-    off = (d.utcoffset().total_seconds() / 3600) if d.utcoffset() else 0
-    return d, f"UTC{off:+g}"
+def local(ts, tzname=None):
+    """Wall-clock time in the user's time zone (Settings > Time zone) and a 'UTC+4' label."""
+    return TZ.local(ts)
 
 
 def _event(cur, title, ts, impact, forecast, previous):
@@ -214,11 +207,13 @@ async def upcoming(hours=168, impact=None, past_h=2):
     rows = [e for e in _st["events"]
             if e["currency"] in c["cur"] and e["impact"] in levels
             and now - past_h * 3600 <= e["ts"] <= now + hours * 3600]
-    return [{**e, "mins": round((e["ts"] - now) / 60), "affects": AFFECTS.get(e["currency"], "")} for e in rows]
+    lab = TZ.label_now()
+    return [{**e, "mins": round((e["ts"] - now) / 60), "affects": AFFECTS.get(e["currency"], ""),
+             "local_time": TZ.hm(e["ts"]), "local_day": TZ.day(e["ts"]), "tz": lab} for e in rows]
 
 
 def _alert(e, lead, mins, c):
-    d, tzl = local(e["ts"], c["tz"])
+    d, tzl = local(e["ts"])
     folder = "Red folder" if e["impact"] == "high" else "Orange folder"
     name = f"{e['currency']} {e['title']}"
     extra = []
@@ -242,7 +237,7 @@ def _alert(e, lead, mins, c):
 
 def test_alert():
     c = cfg()
-    d, tzl = local(time.time() + 900, c["tz"])
+    d, tzl = local(time.time() + 900)
     events.add("news", "Red folder: USD Test event in 15 min",
                f"This is a test of the red-folder alert. Release at {d:%H:%M} ({tzl}). "
                "Forecast 0.3%, previous 0.4%. Affects: Gold, USD pairs, crypto.", "warning")

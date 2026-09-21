@@ -73,6 +73,9 @@ class SettingsPage extends StatelessWidget {
                     ? 'Red-folder news alerts'
                     : '${cal['alerts'] == true ? 'On' : 'Off'}: ${cal['impact'] == 'medium' ? 'red + orange' : 'red folder'}, $cur',
                 const CalendarAlertsPage()),
+            _tile(context, Icons.schedule, 'Time zone',
+                '${sp.section('general')['tz_title'] ?? 'Automatic (this phone)'}  (${sp.section('general')['tz_label'] ?? ''})',
+                const TimeZonePage()),
             _tile(context, Icons.auto_graph, 'AI analyst',
                 'Default style: ${styleLabels[an['style']] ?? 'Intraday'}', const AnalystPage()),
             _tile(context, Icons.monitor_heart_outlined, 'Diagnostics', 'Server, live feed, push and calendar status',
@@ -280,6 +283,25 @@ class _NotificationsPageState extends State<NotificationsPage> {
     }
   }
 
+  Future<void> _testSetup() async {
+    try {
+      await Api.post('/api/setups/test');
+      if (mounted) {
+        setState(() {
+          ok = true;
+          msg = 'Test setup alert sent. A pop-up (and push, if enabled) should arrive.';
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          ok = false;
+          msg = '$e';
+        });
+      }
+    }
+  }
+
   Future<void> _copy(String topic) async {
     await Clipboard.setData(ClipboardData(text: topic));
     if (mounted) {
@@ -302,6 +324,9 @@ class _NotificationsPageState extends State<NotificationsPage> {
           final push = ServerPrefs.I.section('push');
           final kinds = (push['kinds'] as Map?)?.cast<String, dynamic>() ?? {};
           final pushOn = push['enabled'] == true;
+          final setupsCfg = ServerPrefs.I.section('setups');
+          final setupStyles = ((setupsCfg['styles'] as List?) ?? ['scalp', 'intraday', 'swing']).map((e) => '$e').toList();
+          final setupMarkets = ((setupsCfg['markets'] as List?) ?? ['crypto', 'forex']).map((e) => '$e').toList();
           final topic = info != null && info!['topic'] != null ? '${info!['topic']}' : '';
           final configured = info != null && info!['configured'] == true;
           return ListView(padding: const EdgeInsets.all(12), children: [
@@ -321,6 +346,105 @@ class _NotificationsPageState extends State<NotificationsPage> {
                     value: lp.kinds.contains(e.key),
                     onChanged: lp.toasts ? (v) => lp.setKind(e.key, v) : null,
                   ),
+              ]),
+            ),
+            const Heading('Trade setup alerts'),
+            Panel(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                SwitchListTile(
+                  title: const Text('Alert when a new setup appears'),
+                  subtitle: Text('Sent as soon as the server finds it, before price reaches the zone',
+                      style: TextStyle(color: p.muted, fontSize: 12.5)),
+                  value: setupsCfg['enabled'] == true,
+                  onChanged: (v) => ServerPrefs.I.update({'setups': {'enabled': v}}),
+                ),
+                SwitchListTile(
+                  dense: true,
+                  title: const Text('Also alert when price reaches the zone or it is READY'),
+                  value: setupsCfg['on_zone'] == true,
+                  onChanged: setupsCfg['enabled'] == true ? (v) => ServerPrefs.I.update({'setups': {'on_zone': v}}) : null,
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                  child: Text('Minimum confidence: ${setupsCfg['min_conf'] ?? 50}', style: TextStyle(color: p.muted, fontSize: 12.5)),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+                  child: Wrap(spacing: 8, children: [
+                    for (final c in [0, 40, 50, 60, 70, 80])
+                      ChoiceChip(
+                        label: Text(c == 0 ? 'Any' : '$c+'),
+                        selected: (setupsCfg['min_conf'] as num?)?.toInt() == c,
+                        onSelected: (_) => ServerPrefs.I.update({'setups': {'min_conf': c}}),
+                      ),
+                  ]),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+                  child: Wrap(spacing: 8, children: [
+                    for (final e in styleLabels.entries)
+                      FilterChip(
+                        label: Text(e.value),
+                        selected: setupStyles.contains(e.key),
+                        onSelected: (v) {
+                          final next = [...setupStyles];
+                          if (v) {
+                            next.add(e.key);
+                          } else if (next.length > 1) {
+                            next.remove(e.key);
+                          }
+                          ServerPrefs.I.update({'setups': {'styles': next}});
+                        },
+                      ),
+                    for (final e in const {'crypto': 'Crypto', 'forex': 'Forex and gold'}.entries)
+                      FilterChip(
+                        label: Text(e.value),
+                        selected: setupMarkets.contains(e.key),
+                        onSelected: (v) {
+                          final next = [...setupMarkets];
+                          if (v) {
+                            next.add(e.key);
+                          } else if (next.length > 1) {
+                            next.remove(e.key);
+                          }
+                          ServerPrefs.I.update({'setups': {'markets': next}});
+                        },
+                      ),
+                  ]),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+                  child: Text('How often the server looks for setups', style: TextStyle(color: p.muted, fontSize: 12.5)),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+                  child: SegmentedButton<int>(
+                    segments: const [
+                      ButtonSegment(value: 60, label: Text('1 min')),
+                      ButtonSegment(value: 120, label: Text('2 min')),
+                      ButtonSegment(value: 300, label: Text('5 min')),
+                    ],
+                    selected: {[60, 120, 300].contains((setupsCfg['scan_seconds'] as num?)?.toInt()) ? (setupsCfg['scan_seconds'] as num).toInt() : 60},
+                    onSelectionChanged: (s) => ServerPrefs.I.update({'setups': {'scan_seconds': s.first}}),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: Text(
+                    'Needs "Send push notifications" below and the "New trade setups" category to be on. '
+                    'Phone pop-ups use the pop-up list above.',
+                    style: TextStyle(color: p.muted, fontSize: 12, height: 1.4),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: OutlinedButton.icon(
+                    onPressed: _testSetup,
+                    icon: const Icon(Icons.notifications_active_outlined, size: 18),
+                    label: const Text('Send a test setup alert'),
+                  ),
+                ),
               ]),
             ),
             const Heading('Push notifications (app closed)'),
@@ -526,6 +650,145 @@ class _CalendarAlertsPageState extends State<CalendarAlertsPage> {
             ]),
             const SizedBox(height: 8),
             if (msg.isNotEmpty) Panel(child: Text(msg, style: TextStyle(color: ok ? p.gain : p.loss))),
+          ]);
+        },
+      ),
+    );
+  }
+}
+
+// ----------------------------------------------------------------- time zone
+
+const timeZones = [
+  ['UTC', 'UTC'],
+  ['Europe/London', 'London'],
+  ['Europe/Paris', 'Paris, Frankfurt, Madrid'],
+  ['Europe/Athens', 'Athens, Helsinki, Kyiv'],
+  ['Europe/Istanbul', 'Istanbul'],
+  ['Europe/Moscow', 'Moscow'],
+  ['Asia/Dubai', 'Dubai, Abu Dhabi'],
+  ['Asia/Riyadh', 'Riyadh, Kuwait, Baghdad'],
+  ['Asia/Karachi', 'Karachi'],
+  ['Asia/Tashkent', 'Tashkent'],
+  ['Asia/Almaty', 'Almaty'],
+  ['Asia/Kolkata', 'India'],
+  ['Asia/Dhaka', 'Dhaka'],
+  ['Asia/Bangkok', 'Bangkok, Jakarta'],
+  ['Asia/Singapore', 'Singapore, Kuala Lumpur, Manila'],
+  ['Asia/Hong_Kong', 'Hong Kong'],
+  ['Asia/Shanghai', 'China'],
+  ['Asia/Tokyo', 'Tokyo'],
+  ['Asia/Seoul', 'Seoul'],
+  ['Australia/Sydney', 'Sydney'],
+  ['Pacific/Auckland', 'Auckland'],
+  ['Africa/Cairo', 'Cairo'],
+  ['Africa/Johannesburg', 'Johannesburg'],
+  ['Africa/Lagos', 'Lagos'],
+  ['Africa/Nairobi', 'Nairobi'],
+  ['America/Sao_Paulo', 'Sao Paulo'],
+  ['America/Argentina/Buenos_Aires', 'Buenos Aires'],
+  ['America/Mexico_City', 'Mexico City'],
+  ['America/Bogota', 'Bogota, Lima'],
+  ['America/New_York', 'New York (Eastern)'],
+  ['America/Chicago', 'Chicago (Central)'],
+  ['America/Denver', 'Denver (Mountain)'],
+  ['America/Los_Angeles', 'Los Angeles (Pacific)'],
+  ['America/Toronto', 'Toronto'],
+  ['Pacific/Honolulu', 'Honolulu'],
+];
+
+class TimeZonePage extends StatefulWidget {
+  const TimeZonePage({super.key});
+  @override
+  State<TimeZonePage> createState() => _TimeZonePageState();
+}
+
+class _TimeZonePageState extends State<TimeZonePage> {
+  Map<String, dynamic>? info;
+  String? err;
+
+  @override
+  void initState() {
+    super.initState();
+    ServerPrefs.I.load().then((_) => _info());
+  }
+
+  Future<void> _info() async {
+    if (!Api.ready) return;
+    try {
+      final d = await Api.get('/api/time') as Map<String, dynamic>;
+      if (mounted) setState(() => info = d);
+    } catch (e) {
+      if (mounted) setState(() => err = '$e');
+    }
+  }
+
+  Future<void> _pick(String id) async {
+    final dev = DateTime.now().timeZoneOffset.inMinutes;
+    await ServerPrefs.I.update({
+      'general': {'timezone': id, if (id == 'auto') 'tz_offset_min': dev}
+    });
+    await _info();
+  }
+
+  Widget _tile(Pal p, String id, String title, String sub, String current) => ListTile(
+        dense: true,
+        title: Text(title),
+        subtitle: sub.isEmpty ? null : Text(sub, style: TextStyle(color: p.muted, fontSize: 12)),
+        trailing: current == id ? Icon(Icons.check_circle, color: p.accent) : null,
+        onTap: () => _pick(id),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.pal;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Time zone')),
+      body: ListenableBuilder(
+        listenable: ServerPrefs.I,
+        builder: (context, _) {
+          final g = ServerPrefs.I.section('general');
+          final current = '${g['timezone'] ?? 'auto'}';
+          final i = info;
+          final sessions = (i?['sessions'] as List?) ?? [];
+          return ListView(padding: const EdgeInsets.all(12), children: [
+            if (err != null) Panel(child: Text(err!, style: TextStyle(color: p.loss))),
+            if (i != null)
+              Panel(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('YOUR TIME', style: TextStyle(color: p.muted, fontSize: 11, letterSpacing: 1)),
+                  const SizedBox(height: 4),
+                  Text('${i['now']}   ${i['label']}', style: numStyle.copyWith(fontSize: 26, fontWeight: FontWeight.w800)),
+                  Text('${i['date']}  -  New York ${i['ny_now']}', style: TextStyle(color: p.muted, fontSize: 12.5)),
+                  const SizedBox(height: 10),
+                  Text('${(i['forex'] as Map)['text']}', style: TextStyle(color: (i['forex'] as Map)['open'] == true ? p.gain : p.loss, fontSize: 12.5)),
+                  const SizedBox(height: 6),
+                  Text('Forex and gold hours: ${i['forex_hours']}', style: numStyle.copyWith(fontSize: 12.5)),
+                  const SizedBox(height: 8),
+                  Text('ICT sessions today (your time)', style: TextStyle(color: p.muted, fontSize: 12)),
+                  for (final s in sessions)
+                    Text('${(s as Map)['name']}: ${s['start']} - ${s['end']}', style: numStyle.copyWith(fontSize: 12.5)),
+                ]),
+              ),
+            const Heading('Show times in'),
+            Panel(
+              padding: EdgeInsets.zero,
+              child: Column(children: [
+                _tile(p, 'auto', 'Automatic', 'Follow this phone (${g['tz_label'] ?? ''})', current),
+                const Divider(height: 1),
+                for (final z in timeZones) ...[
+                  _tile(p, z[0], z[1], z[0], current),
+                  const Divider(height: 1),
+                ],
+              ]),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Market rules stay in New York time (forex closes Friday 17:00 and reopens Sunday 17:00 there). '
+              'This setting only changes how times are shown: alerts, reports, the calendar, session times and market hours. '
+              'In automatic mode the app reports its offset each time it opens, so open it after travelling or a clock change.',
+              style: TextStyle(color: p.muted, fontSize: 12, height: 1.4),
+            ),
           ]);
         },
       ),

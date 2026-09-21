@@ -9,7 +9,7 @@ three styles: scalp, intraday and swing.
 
 Everything is a mechanical approximation of discretionary concepts. It is analysis, not advice."""
 from datetime import datetime, timedelta, timezone
-from . import analytics as A
+from . import analytics as A, tz as TZ
 
 STYLES = {
     "scalp": {"ctx": "4h", "bias": "1h", "setup": "15m", "trigger": "5m", "label": "Scalping", "reach": 4.0},
@@ -556,10 +556,16 @@ def session_info(ts=None, kind="crypto"):
     wd = d.weekday()
     closed = kind == "forex" and (wd == 5 or (wd == 4 and h >= 17) or (wd == 6 and h < 17))
     out = {"name": name, "kill": kill, "closed": closed, "ny_time": d.strftime("%H:%M")}
+    now_ts = ts or _t.time()
+    loc, lab = TZ.local(now_ts)
+    out["local_time"], out["tz"] = loc.strftime("%H:%M"), lab
     if closed:      # spot forex and gold: closed from Friday 17:00 to Sunday 17:00 New York time
         nxt = (d + timedelta(days={4: 2, 5: 1, 6: 0}[wd])).replace(hour=17, minute=0, second=0, microsecond=0)
         out["reopen_min"] = int((nxt - d).total_seconds() // 60)
-        out["reopen_text"] = f"Sunday {nxt:%H:%M} New York ({nxt.astimezone(timezone.utc):%H:%M} UTC)"
+        lo = nxt.astimezone(TZ.zone())
+        out["reopen_text"] = f"{lo:%A %H:%M} your time ({TZ.label(lo)})" + \
+            ("" if lo.utcoffset() == nxt.utcoffset() else " = Sunday 17:00 New York")
+        out["reopen_ts"] = nxt.timestamp()
     return out
 
 
@@ -1406,7 +1412,10 @@ def report_text(res, label, focus=None, mods=None):
 
     z = ["ICT CONTEXT"]
     ss = ict["session"]
-    z.append(f"Session: {ss['name']} (NY {ss['ny_time']})" + (", market closed" if ss["closed"] else ""))
+    z.append(f"Session: {ss['name']} (New York {ss['ny_time']}, your time {ss['local_time']} {ss['tz']})" + (", market closed" if ss["closed"] else ""))
+    z.append(f"Kill zones today, your time ({ss['tz']}): " + "; ".join(f"{w['name']} {w['start']}-{w['end']}" for w in TZ.sessions()))
+    if res["kind"] == "forex":
+        z.append(f"Forex and gold hours, your time: {TZ.market_hours()}")
     if "pdh" in ict:
         z.append(f"Previous day high {fmt(ict['pdh'])} / low {fmt(ict['pdl'])}; daily open {fmt(ict['dopen'])} ({'above' if px > ict['dopen'] else 'below'})")
     if "pwh" in ict:

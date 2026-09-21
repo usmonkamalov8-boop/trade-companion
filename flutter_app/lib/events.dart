@@ -53,6 +53,8 @@ IconData kindIcon(String kind) {
       return Icons.memory;
     case 'news':
       return Icons.event_note;
+    case 'setup':
+      return Icons.auto_graph;
     case 'warning':
       return Icons.warning_amber_rounded;
     default:
@@ -60,7 +62,7 @@ IconData kindIcon(String kind) {
   }
 }
 
-const eventFilters = {'all': 'All', 'trades': 'Trades', 'news': 'News', 'bot': 'Bot', 'alerts': 'Alerts'};
+const eventFilters = {'all': 'All', 'trades': 'Trades', 'setups': 'Setups', 'news': 'News', 'bot': 'Bot', 'alerts': 'Alerts'};
 
 bool eventMatches(AppEvent e, String f) {
   switch (f) {
@@ -68,6 +70,8 @@ bool eventMatches(AppEvent e, String f) {
       return e.kind == 'position' || e.kind == 'trade';
     case 'news':
       return e.kind == 'news';
+    case 'setups':
+      return e.kind == 'setup';
     case 'bot':
       return const ['command', 'service', 'risk', 'profile', 'system'].contains(e.kind);
     case 'alerts':
@@ -80,8 +84,8 @@ bool eventMatches(AppEvent e, String f) {
 String _two(int n) => n.toString().padLeft(2, '0');
 
 String clockText(double ts) {
-  final d = DateTime.fromMillisecondsSinceEpoch((ts * 1000).round());
-  final now = DateTime.now();
+  final d = TzClock.dt(ts);
+  final now = TzClock.now();
   final t = '${_two(d.hour)}:${_two(d.minute)}:${_two(d.second)}';
   if (d.year == now.year && d.month == now.month && d.day == now.day) return t;
   return '${_two(d.day)}/${_two(d.month)} $t';

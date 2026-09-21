@@ -10,7 +10,7 @@ from . import events, prefs, config as C
 STATE = C.BASE / "push_state.json"
 _TITLES = {"position": "Position update", "trade": "Trade update", "command": "Bot control action",
            "service": "Bot service change", "warning": "Alert", "news": "News alert",
-           "risk": "Risk change", "profile": "Profile change", "system": "System message"}
+           "risk": "Risk change", "profile": "Profile change", "system": "System message", "setup": "Trade setup"}
 
 
 def cfg():
@@ -55,6 +55,10 @@ def build(e, c):
              "error": "rotating_light"}.get(e["level"], "information_source")]
     if e["kind"] == "news":
         tags = ["newspaper", "warning"]
+    elif e["kind"] == "setup":
+        tags = ["chart_with_downwards_trend" if " SHORT" in e["title"] else "chart_with_upwards_trend"]
+        if e["level"] == "success":          # READY: price in the zone with confirmation
+            prio = 4
     elif "halted" in low:
         tags = ["octagonal_sign"]
     elif "resumed" in low:

@@ -2,7 +2,7 @@
 briefings and answers chat questions. No paid API, no LLM, no keys."""
 import asyncio, re, time
 from datetime import datetime, timezone
-from . import analytics as A, bot, journal, market, prefs, strategy, config as C
+from . import analytics as A, bot, journal, market, prefs, strategy, tz as TZ, config as C
 
 _scan_cache = {}
 DISCLAIMER = "Rule-based analysis of live data. Not financial advice."
@@ -26,7 +26,7 @@ ALIASES = {
 
 
 def _now():
-    return datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
+    return TZ.stamp()
 
 
 async def _safe(coro):
@@ -72,7 +72,8 @@ def market_status(kind):
         m = ss.get("reopen_min", 0)
         return {"open": False, "text": f"Market Closed (Weekend). Reopens {ss['reopen_text']}, in {m // 60} h {m % 60} min.",
                 "session": "Closed", "reopen_min": m}
-    return {"open": True, "text": f"Forex and gold are open. Session: {ss['name']} (New York {ss['ny_time']}).", "session": ss["name"]}
+    return {"open": True, "text": f"Forex and gold are open. Session: {ss['name']} (New York {ss['ny_time']}, your time {ss['local_time']} {ss['tz']}).",
+            "session": ss["name"]}
 
 
 def public_rows(rows, kind="crypto"):
@@ -382,7 +383,7 @@ async def calendar_text():
     if not rows:
         L.append("No high-impact events in this window.")
     for e in rows:
-        d, tzl = econ.local(e["ts"], c["tz"])
+        d, tzl = econ.local(e["ts"])
         m = e["mins"]
         if m < -1:
             when = "released"
@@ -708,7 +709,9 @@ async def answer(question, history=None):
     if re.search(r"(forex|fx|gold|market|xau).{0,25}(open|closed|hours)|(open|closed).{0,15}(forex|fx|gold|market)|market hours|trading hours|forex hours", ql):
         ms = market_status("forex")
         return (f"Forex and gold: {ms['text']}\nCrypto: trades 24/7.\n"
-                "Spot forex and gold are closed from Friday 17:00 to Sunday 17:00 New York time, and no signals are produced while closed.")
+                f"Weekly forex and gold hours in your time: {TZ.market_hours()} (Friday 17:00 to Sunday 17:00 New York). "
+                "No signals are produced while closed.\n"
+                f"Kill zones today ({TZ.label_now()}): " + "; ".join(f"{w['name']} {w['start']}-{w['end']}" for w in TZ.sessions()))
     if _has(ql, "screener", "scanner", "scan all", "scan everything", "scan the market", "scan markets"):
         return await screener_text("crypto" if _has(ql, "crypto") else ("forex" if _has(ql, "forex", "fx") else None), _style_of(ql))
     assets = find_assets(q)

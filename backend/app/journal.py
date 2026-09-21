@@ -9,7 +9,7 @@ Rules (deliberately conservative, so the stats are not flattering):
 - A win is TP1 before the stop (R = reward to TP1). A loss is -1R. Fees and slippage are ignored.
 - Setups that never fill expire; filled setups that neither hit TP1 nor the stop time out at market."""
 import asyncio, json, sqlite3, time
-from . import analytics as A, config as C, prefs, strategy
+from . import analytics as A, config as C, events, prefs, strategy
 
 DB = C.BASE / "journal.db"
 LIFE = {"scalp": 8 * 3600, "intraday": 36 * 3600, "swing": 10 * 86400}          # unfilled setups expire
@@ -40,6 +40,9 @@ def _db():
 def init():
     with _db() as con:
         con.executescript(SCHEMA)
+        cols = {r[1] for r in con.execute("PRAGMA table_info(setups)")}
+        if "alert_state" not in cols:          # added with instant setup alerts
+            con.execute("ALTER TABLE setups ADD COLUMN alert_state TEXT")
 
 
 init()
@@ -68,13 +71,13 @@ def record(res, now=None):
         nfx = s.get("news") or {}
         cur = con.execute(
             "INSERT INTO setups (ts,name,kind,style,dir,status0,conf,conf_raw,news_pts,poi_type,poi_tf,confluence,"
-            "zone_lo,zone_hi,entry,stop,tp1,tp2,rr1,rr2,price0,factors,sig,state,expires_ts) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "zone_lo,zone_hi,entry,stop,tp1,tp2,rr1,rr2,price0,factors,sig,state,expires_ts,alert_state) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (now, res["name"], res["kind"], res["style"], s["direction"], s["status"], s["confidence"], s["conf_raw"],
              nfx.get("pts", 0), s["poi"]["type"], s["poi"]["tf"], ",".join(s["poi"]["confluence"]),
              z["low"], z["high"], s["entry"], s["stop"], s["tp1"]["price"], s["tp2"]["price"],
              s["risk"]["rr1"], s["risk"]["rr2"], res["price"], json.dumps(s["factors"]), sig, "pending",
-             now + LIFE[res["style"]]))
+             now + LIFE[res["style"]], s["status"] if s["status"] in ("IN ZONE", "READY") else ""))
         return cur.lastrowid
 
 
@@ -259,12 +262,94 @@ def counts():
     return {"open": o, "total": t, "last_scan": _st["last_scan"], "last_new": _st["last_new"], "error": _st["error"]}
 
 
+# ------------------------------------------------------------------ instant setup alerts
+
+_RANK = {"": 0, "IN ZONE": 1, "READY": 2}
+MAX_ALERTS_PER_SCAN = 8
+
+
+def _sig(res):
+    s, z = res["setup"], res["setup"]["zone"]
+    return f"{res['name']}|{res['style']}|{s['direction']}|{s['poi']['type']}|{s['poi']['tf']}|{z['low']:.6g}|{z['high']:.6g}"
+
+
+def _wanted(res, update=False):
+    """Does this setup pass the alert filters chosen in Settings > Notifications?"""
+    cfg = prefs.get()["setups"]
+    s = res["setup"]
+    if not cfg["enabled"] or res["style"] not in cfg["styles"] or res["kind"] not in cfg["markets"]:
+        return False
+    if update and not cfg["on_zone"]:
+        return False
+    return s["confidence"] >= cfg["min_conf"]
+
+
+def _status_line(res):
+    st = res["setup"]["status"]
+    cfg = strategy.STYLES[res["style"]]
+    trig = strategy.tfl(cfg["trigger"])
+    if st == "READY":
+        return f"READY: price is in the zone and {trig} confirmation is present."
+    if st == "IN ZONE":
+        return f"Price is in the zone: wait for a {trig} CHoCH/BOS before entering."
+    if st == "NEWS HOLD":
+        n = res["setup"].get("news") or {}
+        w = n.get("worst") or {}
+        return f"NEWS HOLD: {w.get('currency', '')} {w.get('title', 'a high-impact release')} is imminent. Do not enter yet."
+    return "Waiting for price to reach the zone."
+
+
+def _alert(res, update=False):
+    s = res["setup"]
+    stg = s["strings"]
+    d = "LONG" if s["direction"] == "long" else "SHORT"
+    if update:
+        title = f"Setup update: {res['name']} {d} ({res['style']}) - {s['status']}"
+    else:
+        title = f"New {res['style']} setup: {res['name']} {d} (confidence {s['confidence']})"
+    text = (f"Zone {stg['entry']}, stop {stg['stop']}, TP1 {stg['tp1']} ({s['risk']['rr1']:.1f}R). "
+            + _status_line(res))
+    if s.get("vp_tags"):
+        text += f" Volume: {', '.join(s['vp_tags'])}."
+    level = "success" if s["status"] == "READY" else ("warning" if s["status"] == "NEWS HOLD" else "info")
+    events.add("setup", title, text, level)
+
+
+def process(res, now=None):
+    """Log a setup. Returns 'new' for a newly logged setup, 'update' when an already logged, unfilled setup has
+    just reached its zone / READY, or None."""
+    if record(res, now):
+        return "new"
+    s = res.get("setup") or {}
+    if res.get("error") or s.get("direction", "none") == "none" or not s.get("poi") or not s.get("factors"):
+        return None
+    rank = _RANK.get(s["status"], 0)
+    if not rank:
+        return None
+    with _db() as con:
+        row = con.execute("SELECT id, alert_state FROM setups WHERE sig=? AND state='pending' ORDER BY ts DESC LIMIT 1",
+                          (_sig(res),)).fetchone()
+        if row and rank > _RANK.get(row["alert_state"] or "", 0):
+            con.execute("UPDATE setups SET alert_state=? WHERE id=?", (s["status"], row["id"]))
+            return "update"
+    return None
+
+
+def test_alert():
+    events.add("setup", "New intraday setup: BTC LONG (confidence 68)",
+               "Zone 67,100 - 67,300, stop 66,900, TP1 68,400 (2.1R). Waiting for price to reach the zone. "
+               "This is a test of the instant setup alert.", "info")
+
+
 # ------------------------------------------------------------------ background tracker
 
 
 async def scan():
     from . import engine
     new = 0
+    with _db() as con:
+        baseline = con.execute("SELECT COUNT(*) FROM setups").fetchone()[0] == 0   # first ever scan: log silently
+    pending = []
     for style in strategy.STYLES:
         for kind, names in (("crypto", list(C.CRYPTO)), ("forex", [n for n in C.FOREX if n != "DXY"])):
             for nm in names:
@@ -273,8 +358,17 @@ async def scan():
                 except Exception as e:
                     _st["error"] = f"{nm} {style}: {e}"
                     continue
-                if record(res):
+                what = process(res)
+                if what == "new":
                     new += 1
+                if what and not baseline and _wanted(res, update=(what == "update")):
+                    pending.append((what, res))
+    pending.sort(key=lambda x: -x[1]["setup"]["confidence"])
+    for what, res in pending[:MAX_ALERTS_PER_SCAN]:
+        _alert(res, update=(what == "update"))
+    if len(pending) > MAX_ALERTS_PER_SCAN:
+        events.add("setup", f"{len(pending) - MAX_ALERTS_PER_SCAN} more setup alerts",
+                   "Open Markets > Screener to see all current setups.", "info")
     _st["last_new"] = new
 
 
@@ -298,4 +392,4 @@ async def run():
         except Exception as e:
             _st["error"] = str(e)[:120]
             print("journal error:", e)
-        await asyncio.sleep(SCAN_EVERY)
+        await asyncio.sleep(prefs.get()["setups"].get("scan_seconds", SCAN_EVERY))

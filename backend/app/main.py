@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from . import bot, econ, engine, events, journal, market, prefs, push, strategy, watcher, config as C
+from . import bot, econ, engine, events, journal, market, prefs, push, strategy, tz, watcher, config as C
 
 
 @asynccontextmanager
@@ -178,24 +178,47 @@ class PrefsIn(BaseModel):
     push: dict | None = None
     calendar: dict | None = None
     analyst: dict | None = None
+    general: dict | None = None
+    setups: dict | None = None
+
+
+def _prefs_view(p):
+    """Preferences plus the effective time zone (so the app can show it without a tz database)."""
+    out = dict(p)
+    out["general"] = {**p["general"], "tz_label": tz.label_now(), "tz_offset_now": tz.offset_now(), "tz_title": tz.zone_title()}
+    return out
 
 
 @api.get("/prefs")
 async def prefs_get():
-    return prefs.get()
+    return _prefs_view(prefs.get())
 
 
 @api.post("/prefs")
 async def prefs_set(b: PrefsIn):
     patch = {k: v for k, v in b.model_dump().items() if v is not None}
-    return prefs.save(patch)
+    return _prefs_view(prefs.save(patch))
+
+
+@api.get("/time")
+async def time_info():
+    """Current time in the user's zone, market hours and ICT sessions converted to it."""
+    d = tz.info()
+    d["forex"] = engine.market_status("forex")
+    return d
+
+
+@api.post("/setups/test")
+async def setups_test():
+    journal.test_alert()
+    return {"ok": True}
 
 
 @api.get("/diagnostics")
 async def diagnostics():
     st = bot.load()
     return {"time": int(time.time()), "service": bot.service_state(), "halted": st["halted"],
-            "events": {"last_id": events.last_id()}, "push": push.info(), "calendar": econ.diag(),
+            "events": {"last_id": events.last_id()}, "push": push.info(), "calendar": econ.diag(), "timezone": tz.info(),
             "journal": journal.counts()}
 
 
@@ -208,7 +231,7 @@ async def calendar(hours: int = Query(168, ge=1, le=336), impact: str = Query("h
     if refresh:
         await econ.refresh(force=True)
     rows = await econ.upcoming(hours, impact if impact in ("high", "medium") else "high")
-    return {"events": rows, **econ.status()}
+    return {"events": rows, **econ.status(), "tz": tz.label_now()}
 
 
 @api.post("/calendar/test")
