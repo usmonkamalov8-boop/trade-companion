@@ -55,6 +55,8 @@ IconData kindIcon(String kind) {
       return Icons.event_note;
     case 'setup':
       return Icons.auto_graph;
+    case 'digest':
+      return Icons.summarize_outlined;
     case 'warning':
       return Icons.warning_amber_rounded;
     default:

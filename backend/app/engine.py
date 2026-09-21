@@ -2,7 +2,7 @@
 briefings and answers chat questions. No paid API, no LLM, no keys."""
 import asyncio, re, time
 from datetime import datetime, timezone
-from . import analytics as A, backtest, bot, hypotheses, journal, market, prefs, strategy, tz as TZ, config as C
+from . import analytics as A, backtest, bot, digest, hypotheses, journal, market, prefs, strategy, tz as TZ, config as C
 
 _scan_cache = {}
 DISCLAIMER = "Rule-based analysis of live data. Not financial advice."
@@ -648,10 +648,21 @@ async def analyze(name, style):
     if hit and time.time() - hit[0] < 60:
         return hit[1]
     kind = "crypto" if name in C.CRYPTO else "forex"
-    tfs, news = await asyncio.gather(market.tfs(name, kind, list(strategy.ALL_TFS)), _news())
+    tfs, news, fund = await asyncio.gather(market.tfs(name, kind, list(strategy.ALL_TFS)), _news(),
+                                           market.funding() if kind == "crypto" else asyncio.sleep(0, {}))
     dec = None if kind == "crypto" else C.FOREX[name][1]
     res = await asyncio.to_thread(strategy.build, name, kind, style, tfs, dec, mods, time.time(), news)
     res["news_active"] = news is not None
+    # shadow mode: log extra numbers next to the setup without touching scores, alerts or entries
+    try:
+        btc = None
+        if kind == "crypto" and name != "BTC" and not res.get("error") and not res.get("closed"):
+            b = await analyze("BTC", style)
+            if b.get("_per") and b["_per"].get("bias") and b["_per"].get("setup"):
+                btc = {"bias": b["_per"]["bias"]["trend"], "setup": b["_per"]["setup"]["trend"]}
+        res["shadow"] = strategy.shadow_features(res, (fund or {}).get(name + "USDT"), btc) if not res.get("error") else {}
+    except Exception:
+        res["shadow"] = {}
     _an_cache[key] = (time.time(), res)
     if len(_an_cache) > 200:
         for k in sorted(_an_cache, key=lambda k: _an_cache[k][0])[:50]:
@@ -895,6 +906,8 @@ async def answer(question, history=None):
                 f"Kill zones today ({TZ.label_now()}): " + "; ".join(f"{w['name']} {w['start']}-{w['end']}" for w in TZ.sessions()))
     if _has(ql, "heatmap", "heat map", "market sentiment", "sentiment map"):
         return await heatmap_text(_style_of(ql))
+    if _has(ql, "digest", "weekly summary", "weekly report"):
+        return await asyncio.to_thread(digest.build)
     if _has(ql, "hypothes", "pre-registered", "preregistered"):
         return await asyncio.to_thread(hypotheses.text)
     if _has(ql, "backtest", "back-test", "back test"):

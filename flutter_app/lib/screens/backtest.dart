@@ -110,6 +110,7 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
         'slip_bp': run['slip_bp'],
         'min_conf': run['min_conf'],
         'rules': run['rules'],
+        'shadow': run['shadow'] ?? true,
       });
       job = null;
       await _poll();
@@ -139,16 +140,7 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
               Text('${raw['verdict']}', style: TextStyle(color: cc('${raw['cls']}'), fontWeight: FontWeight.w700, fontSize: 12.5)),
               for (final w in ((raw['windows'] as List?) ?? []))
                 Text(
-                  '${w['role'] == 'test' ? 'TEST' : 'seen'}  ${w['label']}: ' +
-                      (w['missing'] == true
-                          ? 'not run yet'
-                          : (w['note'] != null
-                              ? '${w['note']}'
-                              : (raw['kind'] == 'diff'
-                                  ? 'with bonus ${_r(w['avg_with'])} (${w['n_with']}) vs without ${_r(w['avg_without'])} (${w['n_without']})'
-                                  : ((w['n'] as num) == 0
-                                      ? 'no trades'
-                                      : '${w['n']} trades, average ${_r(w['avg'])} (95%: ${(w['lo'] as num).toStringAsFixed(2)} to ${(w['hi'] as num).toStringAsFixed(2)})')))),
+                  '${w['role'] == 'test' ? 'TEST' : 'seen'}  ${w['label']}: ${w['text'] ?? ''}',
                   style: numStyle.copyWith(color: p.muted, fontSize: 11.5),
                 ),
               if (raw['run'] != null)
@@ -295,6 +287,34 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
             ]),
           ),
         Text('Setups far from the zone rarely fill, so alerts for them are mostly noise.', style: TextStyle(color: p.muted, fontSize: 11.5)),
+      ]),
+    );
+  }
+
+  Widget _eventPanel(Pal p, Map? es) {
+    final rows = (es?['rows'] as List?) ?? [];
+    if (rows.isEmpty) return const SizedBox.shrink();
+    return Panel(
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('DO ZONES CAUSE A REACTION? (EVENT STUDY)',
+            style: TextStyle(color: p.muted, fontSize: 11, letterSpacing: 1, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 4),
+        Text('After price first touches a zone: how often does it move +k ATR in the trade direction before -k ATR, compared with random moments '
+            'and random directions? No stops, targets or fees involved. ${es?['events']} zone touches.',
+            style: TextStyle(color: p.muted, fontSize: 11.5, height: 1.4)),
+        const SizedBox(height: 6),
+        for (final b in rows)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 3),
+            child: Row(children: [
+              SizedBox(width: 70, child: Text('+${b['k']} ATR', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12.5))),
+              SizedBox(width: 120, child: Text('zone ${b['p_zone']}% vs random ${b['p_rand']}%', style: numStyle.copyWith(fontSize: 12))),
+              Expanded(
+                child: Text('${(b['diff'] as num) >= 0 ? '+' : ''}${b['diff']} pts${b['z'] != null ? '  (${b['z']} sigma)' : ''}',
+                    style: numStyle.copyWith(fontSize: 12, color: _col(p, b['diff']))),
+              ),
+            ]),
+          ),
       ]),
     );
   }
@@ -456,6 +476,7 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
             _rows(p, 'BY ASSET (BEST FIRST)', byAsset, byAsset: true),
             _rows(p, 'BY CONFIDENCE (SETUP QUALITY)', (ov['by_conf'] as List?) ?? []),
             if (mode == 'limit') _distRows(p, (ov['by_dist'] as List?) ?? []),
+            if (mode == 'limit') _eventPanel(p, (j?['event_study'] as Map?)),
             _ablation(p, (ov['ablation'] as List?) ?? []),
             _rows(p, 'BY TIME (STABLE OVER TIME?)', (ov['by_third'] as List?) ?? []),
             _rows(p, 'BY ZONE TYPE', (ov['by_poi'] as List?) ?? []),

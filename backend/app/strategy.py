@@ -507,6 +507,23 @@ def divergence(alt, rs, n):
     return best
 
 
+def _efficiency(cl):
+    """Kaufman efficiency ratio of a close series: 1 = a straight line (trend), near 0 = back and forth (range)."""
+    if len(cl) < 10:
+        return None
+    path = sum(abs(cl[i] - cl[i - 1]) for i in range(1, len(cl)))
+    return abs(cl[-1] - cl[0]) / path if path > 0 else None
+
+
+def _taker(c, n=9):
+    """Share of the last n CLOSED candles' volume that was bought by takers (Binance klines carry it). None without it."""
+    tb, v = c.get("tb"), c.get("v")
+    if not tb or not v or len(tb) != len(v) or len(v) < n + 2:
+        return None
+    vol = sum(v[-n - 1:-1])
+    return sum(tb[-n - 1:-1]) / vol if vol > 0 else None
+
+
 def analyze_tf(c, tf):
     n = len(c["c"])
     if n < (18 if tf == "1M" else 30 if tf == "1w" else 40):
@@ -531,6 +548,7 @@ def analyze_tf(c, tf):
             vr = (sum(v[-4:-1]) / 3.0) / base_v        # last 3 closed bars against the previous 30
     return {
         "vp": volume_profile(c, VP_BARS.get(tf, 150)),
+        "er": _efficiency(c["c"][-48:]), "taker": _taker(c),
         "spark": [float(f"{x:.8g}") for x in c["c"][-48:]],
         "rsi": rs[-1], "macd": A.macd_hist(c["c"]), "div": divergence(alt, rs, n), "vol_ratio": vr,
         "tf": tf, "n": n, "price": px, "atr": a, "atr_pct": a / px * 100, "atr_ratio": a / (sum(win) / len(win)),
@@ -1201,6 +1219,30 @@ def _zone_info(z, px, fmt):
     return {"dir": z["dir"], "name": d, "zone": txt, "state": state, "dist": abs(mid - px)}
 
 
+def shadow_features(res, funding=None, btc=None):
+    """Numbers stored next to every setup for LATER analysis. They are never used in the score, the alerts or the entries
+    (shadow mode): a feature only becomes a rule after it passes a pre-registered test on unseen data.
+    funding: last funding rate in percent; btc: {"bias": trend, "setup": trend} of BTC on the same timeframes."""
+    s = res.get("setup") or {}
+    per, allp = res.get("_per") or {}, res.get("_all") or {}
+    sa, ba = per.get("setup"), per.get("bias")
+    if not sa or s.get("direction") in (None, "none"):
+        return {}
+    d = 1 if s["direction"] == "long" else -1
+    r4 = lambda x: None if x is None else round(x, 4)
+    er = sa.get("er")
+    f = {"er_setup": r4(er), "er_bias": r4(ba.get("er") if ba else None),
+         "regime": None if er is None else ("trend" if er >= 0.30 else "range"),
+         "atr_ratio": r4(sa.get("atr_ratio")), "vol_ratio": r4(sa.get("vol_ratio")),
+         "stop_pct": r4((s.get("risk") or {}).get("stop_pct")), "stop_atr": r4((s.get("risk") or {}).get("stop_atr")),
+         "taker_setup": r4(sa.get("taker")), "taker_5m": r4((allp.get("5m") or {}).get("taker")),
+         "funding": r4(funding), "btc_bias": None, "btc_setup": None, "btc_align": None}
+    if btc:
+        f["btc_bias"], f["btc_setup"] = btc.get("bias"), btc.get("setup")
+        f["btc_align"] = None if btc.get("bias") is None else int(btc["bias"] * d)
+    return f
+
+
 def tf_score(a):
     """-100 .. +100 sentiment of one timeframe: structure trend, a fresh break of structure, and RSI tilt."""
     sc = a["trend"] * 50
@@ -1571,4 +1613,6 @@ def public(res, label):
                     "entry": s["strings"]["entry"], "stop": s["strings"]["stop"], "tp1": s["strings"]["tp1"],
                     "tp2": s["strings"]["tp2"], "rr1": round(s["risk"]["rr1"], 1), "rr2": round(s["risk"]["rr2"], 1),
                     "risk_notes": s["risk"]["notes"], "stop_pct": round(s["risk"]["stop_pct"], 2)})
+        out["calc"] = {"entry": s["entry"], "stop": s["stop"], "tp1": s["tp1"]["price"], "tp2": s["tp2"]["price"],
+                       "side": s["direction"]}                  # numbers for the position-size calculator in the app
     return out

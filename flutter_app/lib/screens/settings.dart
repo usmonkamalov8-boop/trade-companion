@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../api.dart';
+import '../calc.dart';
 import '../events.dart';
 import '../prefs.dart';
 import '../theme.dart';
@@ -80,6 +81,16 @@ class SettingsPage extends StatelessWidget {
                 'Default style: ${styleLabels[an['style']] ?? 'Intraday'}', const AnalystPage()),
             _tile(context, Icons.monitor_heart_outlined, 'Diagnostics', 'Server, live feed, push and calendar status',
                 const DiagnosticsPage()),
+            Panel(
+              padding: EdgeInsets.zero,
+              child: ListTile(
+                leading: Icon(Icons.calculate_outlined, color: p.accent),
+                title: const Text('Position size calculator', style: TextStyle(fontWeight: FontWeight.w600)),
+                subtitle: Text('From account size, risk % and stop distance', style: TextStyle(color: p.muted, fontSize: 12.5)),
+                trailing: Icon(Icons.chevron_right, color: p.muted),
+                onTap: () => showPositionCalc(context),
+              ),
+            ),
             const SizedBox(height: 8),
             Text('Trade Companion. Analysis is rule-based and is not financial advice.',
                 textAlign: TextAlign.center, style: TextStyle(color: p.muted, fontSize: 12)),
@@ -170,9 +181,20 @@ class _ConnectionPageState extends State<ConnectionPage> {
         const SizedBox(height: 12),
         if (result.isNotEmpty) Panel(child: Text(result, style: TextStyle(color: ok ? p.gain : p.loss))),
         const SizedBox(height: 8),
+        Panel(
+          child: Text(
+            host.text.trim().replaceAll('http://', '').startsWith('100.')
+                ? 'This is a Tailscale address: traffic is encrypted end to end, and once the server is locked (tc_tailscale.py lock) '
+                    'the API cannot be reached from the internet at all.'
+                : 'This is a public address: anyone on the internet can try to reach the API, and traffic is plain HTTP. '
+                    'Safer: install Tailscale on the VPS and this phone and use the 100.x.y.z address (run tc_tailscale.py setup on the VPS).',
+            style: TextStyle(
+                color: host.text.trim().replaceAll('http://', '').startsWith('100.') ? p.gain : p.warn, fontSize: 12.5, height: 1.4),
+          ),
+        ),
+        const SizedBox(height: 8),
         Text(
-          'The token is stored privately inside this app. Traffic to your VPS is plain HTTP '
-          'unless you put HTTPS in front of the server, so keep the token private.',
+          'The token is stored privately inside this app. Keep it private either way.',
           style: TextStyle(color: p.muted, fontSize: 12.5, height: 1.4),
         ),
       ]),
@@ -302,6 +324,59 @@ class _NotificationsPageState extends State<NotificationsPage> {
     }
   }
 
+  Future<void> _pickTime(String key, String current) async {
+    final parts = current.split(':');
+    final t = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay(hour: int.tryParse(parts[0]) ?? 23, minute: int.tryParse(parts.length > 1 ? parts[1] : '0') ?? 0),
+      builder: (c, w) => MediaQuery(data: MediaQuery.of(c).copyWith(alwaysUse24HourFormat: true), child: w!),
+    );
+    if (t == null) return;
+    final v = '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+    await ServerPrefs.I.update({'setups': {'quiet': {key: v}}});
+  }
+
+  Future<void> _readDigest() async {
+    try {
+      final d = await Api.get('/api/digest') as Map<String, dynamic>;
+      if (!mounted) return;
+      showDialog(
+        context: context,
+        builder: (c) => AlertDialog(
+          title: const Text('Weekly digest'),
+          content: SingleChildScrollView(child: SelectableText('${d['text']}', style: const TextStyle(fontSize: 13, height: 1.4))),
+          actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('Close'))],
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          ok = false;
+          msg = '$e';
+        });
+      }
+    }
+  }
+
+  Future<void> _sendDigest() async {
+    try {
+      await Api.post('/api/digest/send');
+      if (mounted) {
+        setState(() {
+          ok = true;
+          msg = 'Digest sent. It appears in Activity and arrives as a silent push.';
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          ok = false;
+          msg = '$e';
+        });
+      }
+    }
+  }
+
   Future<void> _testSetup() async {
     try {
       await Api.post('/api/setups/test');
@@ -345,6 +420,8 @@ class _NotificationsPageState extends State<NotificationsPage> {
           final pushOn = push['enabled'] == true;
           final setupsCfg = ServerPrefs.I.section('setups');
           final soundCfg = (setupsCfg['sound'] as Map?)?.cast<String, dynamic>() ?? {};
+          final quietCfg = (setupsCfg['quiet'] as Map?)?.cast<String, dynamic>() ?? {};
+          final digestCfg = ServerPrefs.I.section('digest');
           final setupStyles = ((setupsCfg['styles'] as List?) ?? ['scalp', 'intraday', 'swing']).map((e) => '$e').toList();
           final setupMarkets = ((setupsCfg['markets'] as List?) ?? ['crypto', 'forex']).map((e) => '$e').toList();
           final topic = info != null && info!['topic'] != null ? '${info!['topic']}' : '';
@@ -502,17 +579,16 @@ class _NotificationsPageState extends State<NotificationsPage> {
                   value: soundCfg['enabled'] != false,
                   onChanged: (v) => ServerPrefs.I.update({'setups': {'sound': {'enabled': v}}}),
                 ),
-                SwitchListTile(
-                  dense: true,
-                  title: const Text('Urgent only once price is in the zone'),
-                  subtitle: Text('A new setup that price has not reached yet is capped at High',
-                      style: TextStyle(color: p.muted, fontSize: 12)),
-                  value: soundCfg['urgent_needs_ready'] != false,
-                  onChanged: (v) => ServerPrefs.I.update({'setups': {'sound': {'urgent_needs_ready': v}}}),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+                  child: Text(
+                      'Urgent means READY: price is in the zone with confirmation, no news hold, and the confidence is at or above '
+                      'the Urgent level below. A setup price has not reached yet is never louder than High.',
+                      style: TextStyle(color: p.muted, fontSize: 12, height: 1.4)),
                 ),
                 for (final row in [
-                  ['urgent_from', 'Urgent (loudest) from confidence', '85', '75,80,85,90,95'],
-                  ['high_from', 'High from confidence', '70', '55,60,65,70,75'],
+                  ['urgent_from', 'Urgent (loudest) needs confidence of at least', '70', '60,65,70,75,80,85'],
+                  ['high_from', 'High from confidence', '60', '50,55,60,65,70'],
                   ['quiet_below', 'Quiet (silent-ish) below confidence', '50', '30,40,50,60'],
                 ])
                   Padding(
@@ -553,6 +629,114 @@ class _NotificationsPageState extends State<NotificationsPage> {
                     '"Override Do Not Disturb". The server chooses the level; the sound itself is set on the phone.',
                     style: TextStyle(color: p.muted, fontSize: 12, height: 1.4),
                   ),
+                ),
+              ]),
+            ),
+            const Heading('Quiet hours and limits'),
+            Panel(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                SwitchListTile(
+                  title: const Text('Quiet hours'),
+                  subtitle: Text('Setup alerts arrive silently (no sound) in this window, in your time zone (${ServerPrefs.I.section('general')['tz_label'] ?? 'server time'})',
+                      style: TextStyle(color: p.muted, fontSize: 12.5)),
+                  value: quietCfg['enabled'] == true,
+                  onChanged: (v) => ServerPrefs.I.update({'setups': {'quiet': {'enabled': v}}}),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+                  child: Row(children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: quietCfg['enabled'] == true ? () => _pickTime('from', '${quietCfg['from'] ?? '23:00'}') : null,
+                        child: Text('From ${quietCfg['from'] ?? '23:00'}'),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: quietCfg['enabled'] == true ? () => _pickTime('to', '${quietCfg['to'] ?? '07:00'}') : null,
+                        child: Text('To ${quietCfg['to'] ?? '07:00'}'),
+                      ),
+                    ),
+                  ]),
+                ),
+                SwitchListTile(
+                  dense: true,
+                  title: const Text('Let Urgent (READY) alerts through'),
+                  subtitle: Text('Off: even Urgent alerts stay silent during quiet hours',
+                      style: TextStyle(color: p.muted, fontSize: 12)),
+                  value: quietCfg['allow_urgent'] == true,
+                  onChanged: quietCfg['enabled'] == true ? (v) => ServerPrefs.I.update({'setups': {'quiet': {'allow_urgent': v}}}) : null,
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                  child: Text(
+                      'Daily limit for loud (High) alerts: ${((setupsCfg['loud_cap'] as num?)?.toInt() ?? 3) == 0 ? 'no limit' : '${(setupsCfg['loud_cap'] as num?)?.toInt() ?? 3} a day'}',
+                      style: TextStyle(color: p.muted, fontSize: 12.5)),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+                  child: Wrap(spacing: 8, children: [
+                    for (final v in [1, 2, 3, 5, 10, 0])
+                      ChoiceChip(
+                        label: Text(v == 0 ? 'No limit' : '$v'),
+                        selected: ((setupsCfg['loud_cap'] as num?)?.toInt() ?? 3) == v,
+                        onSelected: (_) => ServerPrefs.I.update({'setups': {'loud_cap': v}}),
+                      ),
+                  ]),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 10),
+                  child: Text('After the limit, extra High alerts come at Normal loudness. Urgent (READY) alerts always sound outside quiet hours.',
+                      style: TextStyle(color: p.muted, fontSize: 12, height: 1.4)),
+                ),
+              ]),
+            ),
+            const Heading('Weekly digest'),
+            Panel(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                SwitchListTile(
+                  title: const Text('Send a weekly summary'),
+                  subtitle: Text('Journal results with 95% ranges, repaint rate, hypotheses and backup status. Silent push.',
+                      style: TextStyle(color: p.muted, fontSize: 12.5)),
+                  value: digestCfg['enabled'] != false,
+                  onChanged: (v) => ServerPrefs.I.update({'digest': {'enabled': v}}),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+                  child: Wrap(spacing: 6, children: [
+                    for (var d = 0; d < 7; d++)
+                      ChoiceChip(
+                        label: Text(const ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][d]),
+                        selected: ((digestCfg['day'] as num?)?.toInt() ?? 6) == d,
+                        onSelected: (_) => ServerPrefs.I.update({'digest': {'day': d}}),
+                      ),
+                  ]),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+                  child: Text('At ${((digestCfg['hour'] as num?)?.toInt() ?? 18).toString().padLeft(2, '0')}:00 your time', style: TextStyle(color: p.muted, fontSize: 12.5)),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+                  child: Wrap(spacing: 6, children: [
+                    for (final h in [8, 12, 18, 20, 21])
+                      ChoiceChip(
+                        label: Text('$h:00'),
+                        selected: ((digestCfg['hour'] as num?)?.toInt() ?? 18) == h,
+                        onSelected: (_) => ServerPrefs.I.update({'digest': {'hour': h}}),
+                      ),
+                  ]),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
+                  child: Row(children: [
+                    Expanded(child: OutlinedButton(onPressed: _readDigest, child: const Text('Read it now'))),
+                    const SizedBox(width: 8),
+                    Expanded(child: OutlinedButton(onPressed: _sendDigest, child: const Text('Send it now'))),
+                  ]),
                 ),
               ]),
             ),
@@ -1060,6 +1244,8 @@ class _DiagnosticsPageState extends State<DiagnosticsPage> {
     final jr = x?['journal'] as Map<String, dynamic>?;
     final tzi = x?['timezone'] as Map<String, dynamic>?;
     final rl = x?['rate_limit'] as Map<String, dynamic>?;
+    final sec = x?['security'] as Map<String, dynamic>?;
+    final off = sec?['offsite'] as Map<String, dynamic>?;
     final rlLeft = ((rl?['until'] as num?) ?? 0) - DateTime.now().millisecondsSinceEpoch / 1000;
     return Scaffold(
       appBar: AppBar(title: const Text('Diagnostics'), actions: [
@@ -1077,6 +1263,25 @@ class _DiagnosticsPageState extends State<DiagnosticsPage> {
               _kv(p, 'Live feed', EventService.I.connected ? 'Connected' : 'Offline',
                   color: EventService.I.connected ? p.gain : p.loss),
               _kv(p, 'Events logged', '${(x['events'] as Map)['last_id']}'),
+            ]),
+          ),
+          const Heading('Security and backups'),
+          Panel(
+            child: Column(children: [
+              _kv(p, 'Tailscale',
+                  sec?['tailscale_ip'] != null ? '${sec!['tailscale_ip']}:${sec['port']}' : (sec?['tailscale_installed'] == true ? 'Installed, not signed in' : 'Not installed'),
+                  color: sec?['tailscale_ip'] != null ? p.gain : p.warn),
+              _kv(p, 'API port ${sec?['port'] ?? ''}', sec?['locked'] == true ? 'Locked: only Tailscale can reach it' : 'OPEN to the internet (token only)',
+                  color: sec?['locked'] == true ? p.gain : p.warn),
+              _kv(p, 'Daily backup', sec?['backup_timer'] == true ? 'Scheduled' : 'Not scheduled', color: sec?['backup_timer'] == true ? p.gain : p.warn),
+              _kv(
+                  p,
+                  'Off-server copy',
+                  off?['last_ok'] != null
+                      ? '${off!['provider']}: ${_ago(off!['last_ok'] as num)}'
+                      : (off?['provider'] != null ? '${off!['provider']}: never sent' : 'Not set up'),
+                  color: off?['last_ok'] != null ? p.gain : p.warn),
+              if (off?['last_error'] != null) _kv(p, 'Last error', '${off!['last_error']}', color: p.loss),
             ]),
           ),
           const Heading('Push'),

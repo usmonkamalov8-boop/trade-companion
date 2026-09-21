@@ -55,7 +55,7 @@ def _db():
 
 
 NEW_COLS = (("alert_state", "TEXT"), ("close_ts", "REAL"), ("confirmed", "INTEGER"), ("alert_pending", "INTEGER"),
-            ("last_seen", "REAL"), ("dist_atr", "REAL"))
+            ("last_seen", "REAL"), ("dist_atr", "REAL"), ("features", "TEXT"))
 
 
 def init():
@@ -104,7 +104,7 @@ def record(res, now=None, alert_pending=0):
                "factors": json.dumps(s["factors"]), "sig": sig, "state": "pending", "expires_ts": now + LIFE[res["style"]],
                "alert_state": s["status"] if s["status"] in ("IN ZONE", "READY") else "",
                "close_ts": (int(now // tfs) + 1) * tfs, "alert_pending": int(alert_pending),
-               "dist_atr": s["poi"].get("dist_atr")}
+               "dist_atr": s["poi"].get("dist_atr"), "features": json.dumps(res.get("shadow") or {})}
         cols = ",".join(row)
         cur = con.execute(f"INSERT INTO setups ({cols}) VALUES ({','.join('?' * len(row))})", tuple(row.values()))
         return cur.lastrowid

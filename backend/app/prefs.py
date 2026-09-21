@@ -1,10 +1,10 @@
 """Server-side preferences, edited from the app's Settings. Environment variables only
 provide the first-run defaults; after that prefs.json is the source of truth."""
-import copy, json, os, time
+import copy, json, os, re, time
 from . import config as C
 
 FILE = C.BASE / "prefs.json"
-KINDS = ["position", "trade", "command", "service", "warning", "news", "setup", "risk", "profile", "system"]
+KINDS = ["position", "trade", "command", "service", "warning", "news", "setup", "digest", "risk", "profile", "system"]
 CURRENCIES = ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD"]
 MODULES = ["structure", "ob", "fvg", "sd", "sr", "fib", "trend", "liquidity", "volume", "ict", "poi"]
 STYLES = ["scalp", "intraday", "swing"]
@@ -36,7 +36,7 @@ def defaults():
     return {
         "push": {"enabled": os.getenv("PUSH_ENABLED", "1").strip() != "0",
                  "detail": "minimal" if os.getenv("PUSH_DETAIL", "full").strip().lower() == "minimal" else "full",
-                 "kinds": {k: (k in on or k == "setup") for k in KINDS}},
+                 "kinds": {k: (k in on or k in ("setup", "digest")) for k in KINDS}},
         "calendar": {"alerts": os.getenv("CAL_ALERTS", "1").strip() != "0",
                      "impact": "medium" if imp == "medium" else "high",
                      "currencies": [c for c in cur if c in CURRENCIES] or ["USD", "EUR", "GBP", "JPY"],
@@ -44,8 +44,11 @@ def defaults():
         "general": {"timezone": _env_tz(), "tz_offset_min": None},
         "setups": {"enabled": True, "min_conf": 70, "styles": list(STYLES), "markets": list(MARKETS),
                    "on_zone": True, "scan_seconds": 60, "max_dist_atr": 3, "confirm_close": False,
-                   "sound": {"enabled": True, "urgent_from": 85, "high_from": 70, "quiet_below": 50,
-                             "urgent_needs_ready": True}},
+                   "sound": {"enabled": True, "urgent_from": 70, "high_from": 60, "quiet_below": 50,
+                             "urgent_needs_ready": True},
+                   "quiet": {"enabled": False, "from": "23:00", "to": "07:00", "allow_urgent": False},
+                   "loud_cap": 3},
+        "digest": {"enabled": True, "day": 6, "hour": 18},
         "analyst": {"style": "intraday", "modules": {m: True for m in MODULES}, "news_scoring": True, "journal": True},
     }
 
@@ -143,6 +146,18 @@ def _clean(p):
                 o["markets"] = ml
         if st.get("scan_seconds") in SCAN_SECONDS:
             o["scan_seconds"] = st["scan_seconds"]
+        if isinstance(st.get("loud_cap"), (int, float)) and not isinstance(st.get("loud_cap"), bool):
+            o["loud_cap"] = max(0, min(50, int(st["loud_cap"])))
+        qt = st.get("quiet")
+        if isinstance(qt, dict):
+            qo = {}
+            for k in ("enabled", "allow_urgent"):
+                if isinstance(qt.get(k), bool):
+                    qo[k] = qt[k]
+            for k in ("from", "to"):
+                if isinstance(qt.get(k), str) and re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", qt[k]):
+                    qo[k] = qt[k]
+            o["quiet"] = qo
         sd = st.get("sound")
         if isinstance(sd, dict):
             so = {}
@@ -154,6 +169,16 @@ def _clean(p):
                     so[k] = max(0, min(100, int(sd[k])))
             o["sound"] = so
         out["setups"] = o
+    dg = p.get("digest") or {}
+    if isinstance(dg, dict):
+        o = {}
+        if isinstance(dg.get("enabled"), bool):
+            o["enabled"] = dg["enabled"]
+        if isinstance(dg.get("day"), int) and not isinstance(dg.get("day"), bool) and 0 <= dg["day"] <= 6:
+            o["day"] = dg["day"]
+        if isinstance(dg.get("hour"), int) and not isinstance(dg.get("hour"), bool) and 0 <= dg["hour"] <= 23:
+            o["hour"] = dg["hour"]
+        out["digest"] = o
     an = p.get("analyst") or {}
     if isinstance(an, dict):
         o = {}

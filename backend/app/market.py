@@ -219,7 +219,8 @@ async def klines_tf(name, kind, tf):
             r.raise_for_status()
             rows = r.json()
             return {"t": [x[0] for x in rows], "o": [float(x[1]) for x in rows], "h": [float(x[2]) for x in rows],
-                    "l": [float(x[3]) for x in rows], "c": [float(x[4]) for x in rows], "v": [float(x[5]) for x in rows]}
+                    "l": [float(x[3]) for x in rows], "c": [float(x[4]) for x in rows], "v": [float(x[5]) for x in rows],
+                    "tb": [float(x[9]) if len(x) > 9 else 0.0 for x in rows]}      # taker buy volume (shadow features)
         return await _cached(f"k2:{name}:{tf}", _TTL[tf], go)
     sym = C.FOREX[name][0]
     if tf == "4h":

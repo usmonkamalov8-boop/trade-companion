@@ -15,7 +15,7 @@ then follows price candle by candle with the same rules as the live setup journa
 
 The replay runs in its own low-priority process (python -m app.backtest run --job ID), so the API and the bot stay
 responsive on a small VPS. Progress and results are written to backtests/<id>.json."""
-import bisect, gzip, json, math, os, signal, subprocess, sys, time, uuid
+import bisect, gzip, json, math, os, random, signal, subprocess, sys, time, uuid, zlib
 from pathlib import Path
 from . import config as C, journal, strategy
 
@@ -35,12 +35,16 @@ class Banned(RuntimeError):
     pass
 
 
-def _get(params, tries=4):
+def _get_path(name, params):
+    return _get(params, url=f"https://fapi.binance.com/fapi/v1/{name}")
+
+
+def _get(params, tries=4, url=None):
     """Binance klines with backoff. A ban (418) stops everything: the trading bot shares this IP."""
     import httpx
     for i in range(tries):
         try:
-            r = httpx.get(BINANCE, params=params, timeout=30)
+            r = httpx.get(url or BINANCE, params=params, timeout=30)
             if r.status_code == 418:
                 raise Banned(f"Binance banned this IP (HTTP 418), retry after {r.headers.get('retry-after', '?')} s")
             if r.status_code == 429:
@@ -65,7 +69,7 @@ def _page(sym, a_ms, b_ms):
         data = _get({"symbol": sym, "interval": "5m", "startTime": a_ms, "endTime": b_ms, "limit": 1500})
         if not data:
             break
-        rows += [[x[0], float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in data]
+        rows += [[x[0], float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5]), float(x[9]) if len(x) > 9 else 0.0] for x in data]
         a_ms = data[-1][0] + 300000
         if len(data) < 1500:
             break
@@ -74,9 +78,10 @@ def _page(sym, a_ms, b_ms):
 
 
 def fetch_5m(sym, start_ms, end_ms):
-    """5-minute rows [open_ms, o, h, l, c, v], cached on disk and extended when needed."""
+    """5-minute rows [open_ms, o, h, l, c, v, taker_buy_v], cached on disk and extended when needed.
+    The cache file is *_5m_v2 (older *_5m files have no taker volume and are left alone)."""
     CACHE.mkdir(parents=True, exist_ok=True)
-    path = CACHE / f"{sym}_5m.json.gz"
+    path = CACHE / f"{sym}_5m_v2.json.gz"
     rows = []
     if path.exists():
         try:
@@ -115,11 +120,12 @@ def load_data(name, days, now=None, offset_days=0):
 
 def _cols(rows):
     return {"t": [r[0] / 1000.0 for r in rows], "o": [r[1] for r in rows], "h": [r[2] for r in rows],
-            "l": [r[3] for r in rows], "c": [r[4] for r in rows], "v": [r[5] for r in rows]}
+            "l": [r[3] for r in rows], "c": [r[4] for r in rows], "v": [r[5] for r in rows],
+            "tb": [r[6] if len(r) > 6 else 0.0 for r in rows]}
 
 
 def _resample(base, sec):
-    out = {k: [] for k in ("t", "o", "h", "l", "c", "v", "end")}
+    out = {k: [] for k in ("t", "o", "h", "l", "c", "v", "tb", "end")}
     cur = None
     for i in range(len(base["t"])):
         b = int(base["t"][i] // sec)
@@ -132,11 +138,13 @@ def _resample(base, sec):
             out["l"].append(base["l"][i])
             out["c"].append(base["c"][i])
             out["v"].append(base["v"][i])
+            out["tb"].append(base["tb"][i])
         else:
             out["h"][-1] = max(out["h"][-1], base["h"][i])
             out["l"][-1] = min(out["l"][-1], base["l"][i])
             out["c"][-1] = base["c"][i]
             out["v"][-1] += base["v"][i]
+            out["tb"][-1] += base["tb"][i]
     if out["end"] and base["t"][-1] + 300 < out["end"][-1]:        # the newest bucket is not finished
         for k in out:
             out[k].pop()
@@ -226,10 +234,45 @@ def _confirm_entry(base, i0, T, s, style, end_ts):
     return row, conf + 1
 
 
-def replay(name, rows, wk, mo, days, style, fee_bp, slip_bp, min_conf, end_ts, cancelled=lambda: False, tick=lambda i, n: None):
-    """Replay one asset. Returns (limit_trades, confirm_trades, logged, unresolved)."""
-    base = _cols(rows)
-    base["end"] = [t + 300 for t in base["t"]]
+def fetch_funding(sym, start_ms, end_ms):
+    """Funding-rate history [(time_s, percent)], 8-hourly, cached on disk."""
+    CACHE.mkdir(parents=True, exist_ok=True)
+    path = CACHE / f"{sym}_funding.json.gz"
+    rows = []
+    if path.exists():
+        try:
+            rows = json.load(gzip.open(path, "rt"))
+        except Exception:
+            rows = []
+    lo, hi = (rows[0][0], rows[-1][0]) if rows else (None, None)
+    a = start_ms if not rows or start_ms < lo - 86400000 else hi + 1
+    if not rows or start_ms < lo - 86400000 or end_ms > hi + 86400000:
+        got = []
+        cur = a
+        while cur < end_ms:
+            data = _get_path("fundingRate", {"symbol": sym, "startTime": cur, "endTime": end_ms, "limit": 1000})
+            if not data:
+                break
+            got += [[int(x["fundingTime"]), float(x["fundingRate"]) * 100] for x in data]
+            cur = int(data[-1]["fundingTime"]) + 1
+            if len(data) < 1000:
+                break
+            time.sleep(0.35)
+        rows = sorted({r[0]: r for r in rows + got}.values())
+        with gzip.open(path, "wt") as f:
+            json.dump(rows, f)
+    return [(r[0] / 1000.0, r[1]) for r in rows if start_ms <= r[0] <= end_ms + 8 * 3600000]
+
+
+def _funding_at(fund, T):
+    """Last funding rate (percent) settled before time T."""
+    if not fund:
+        return None
+    i = bisect.bisect_right([f[0] for f in fund], T) - 1
+    return fund[i][1] if i >= 0 else None
+
+
+def _frames(base, wk, mo):
     frames = {"5m": base}
     for tf in ("15m", "1h", "4h", "1d"):
         frames[tf] = _resample(base, SEC[tf])
@@ -237,10 +280,160 @@ def replay(name, rows, wk, mo, days, style, fee_bp, slip_bp, min_conf, end_ts, c
         frames["1w"] = _htf(wk)
     if mo:
         frames["1M"] = _htf(mo)
+    return frames
+
+
+def _slice(frames, T):
+    tfs = {}
+    for tf, d in frames.items():
+        hi = bisect.bisect_right(d["end"], T)
+        lo = max(0, hi - 300)
+        if hi - lo >= 5:
+            tfs[tf] = {key: d[key][lo:hi] for key in ("t", "o", "h", "l", "c", "v", "tb") if key in d}
+    return tfs
+
+
+def _steps(days, style, end_ts):
     step = STEP_MIN[style] * 60
-    start = end_ts - days * 86400
-    first = int(-(-start // step) * step)
-    last = end_ts - 3600
+    first = int(-(-(end_ts - days * 86400) // step) * step)
+    return first, end_ts - 3600, step
+
+
+def btc_trend_map(days, style, end_ts, loader=None):
+    """{step time: (BTC trend on the bias timeframe, BTC trend on the setup timeframe)}, for the BTC-alignment shadow feature."""
+    rows, wk, mo = (loader or (lambda n: load_data(n, days, end_ts, 0)))("BTC")
+    base = _cols(rows)
+    base["end"] = [t + 300 for t in base["t"]]
+    del rows
+    frames = _frames(base, wk, mo)
+    cfg = strategy.STYLES[style]
+    first, last, step = _steps(days, style, end_ts)
+    out, T = {}, first
+    while T <= last:
+        tr = []
+        for role in ("bias", "setup"):
+            tf = cfg[role]
+            d = frames.get(tf)
+            hi = bisect.bisect_right(d["end"], T) if d else 0
+            c = {k: d[k][max(0, hi - 300):hi] for k in ("t", "o", "h", "l", "c", "v") if k in d} if d else None
+            a = strategy.analyze_tf(c, tf) if c and len(c["c"]) >= 40 else None
+            tr.append(a["trend"] if a else None)
+        out[T] = (tr[0], tr[1])
+        T += step
+    return out
+
+
+def _first_passage(base, j, ref, atr, d, ks=(0.5, 1.0, 2.0), bars=288):
+    """Event study: after candle j, does price move +k ATR in direction d before -k ATR? 1 = yes, 0 = adverse first (a
+    candle that touches both counts as adverse), None = neither within the horizon."""
+    n = len(base["t"])
+    end = min(n, j + 1 + bars)
+    fav = {k: ref + d * k * atr for k in ks}
+    adv = {k: ref - d * k * atr for k in ks}
+    res, pending = {}, set(ks)
+    for i in range(j + 1, end):
+        h, l = base["h"][i], base["l"][i]
+        for k in list(pending):
+            f = (h >= fav[k]) if d == 1 else (l <= fav[k])
+            a = (l <= adv[k]) if d == 1 else (h >= adv[k])
+            if f or a:
+                res[k] = 0 if a else 1
+                pending.discard(k)
+        if not pending:
+            break
+    return {str(k): res.get(k) for k in ks}
+
+
+def _touch(base, i0, zl, zh, life_bars):
+    for i in range(i0, min(len(base["t"]), i0 + life_bars)):
+        if base["l"][i] <= zh and base["h"][i] >= zl:
+            return i
+    return None
+
+
+def _exit_variants(base, ia, d, entry, stop, tp1, tp2, style, act_ts, end_ts):
+    """The SAME filled trade replayed with other exits (gross R each; None = not resolved before the data ends).
+    Same rules as the baseline: on the fill candle only the stop counts, a candle that touches stop and target is a stop.
+    plain  = the baseline exit (used to check this simulator against journal.advance).
+    be1    = move the stop to breakeven once price is 1R in profit.
+    runner = half off at TP1, the rest runs to TP2 with the stop at breakeven.
+    time24 = the baseline exit, but closed at market after 24 hours.
+    fixed1r= take profit at exactly 1R instead of the structural target."""
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return None
+    n = len(base["t"])
+    hold = journal.MAX_OPEN[style]
+    R = lambda px: d * (px - entry) / risk
+    rr1 = R(tp1)
+    rr2 = R(tp2) if tp2 is not None and d * (tp2 - tp1) > 0 else None
+    hit = lambda i, lvl: (base["h"][i] >= lvl) if d == 1 else (base["l"][i] <= lvl)
+    stopped = lambda i, lvl: (base["l"][i] <= lvl) if d == 1 else (base["h"][i] >= lvl)
+    state = {k: None for k in ("plain", "be1", "runner", "time24", "fixed1r")}
+    be_stop, run_stop, half = stop, stop, False
+    prev = entry
+    for i in range(ia, n):
+        t = base["t"][i]
+        first = (i == ia)
+        if t - act_ts > hold:                                     # the baseline time-out (4 days for intraday)
+            mtm = R(prev)
+            for k in state:
+                if state[k] is None:
+                    state[k] = (0.5 * rr1 + 0.5 * mtm) if (k == "runner" and half) else mtm
+            break
+        if state["plain"] is None:
+            if stopped(i, stop):
+                state["plain"] = -1.0
+            elif not first and hit(i, tp1):
+                state["plain"] = rr1
+        if state["time24"] is None:
+            if t - act_ts > 86400:
+                state["time24"] = R(prev)
+            elif stopped(i, stop):
+                state["time24"] = -1.0
+            elif not first and hit(i, tp1):
+                state["time24"] = rr1
+        if state["fixed1r"] is None:
+            if stopped(i, stop):
+                state["fixed1r"] = -1.0
+            elif not first and hit(i, entry + d * risk):
+                state["fixed1r"] = 1.0
+        if state["be1"] is None:
+            if stopped(i, be_stop):
+                state["be1"] = R(be_stop)
+            elif not first and hit(i, tp1):
+                state["be1"] = rr1
+            elif not first and (base["h"][i] if d == 1 else -base["l"][i]) >= (entry + risk if d == 1 else -(entry - risk)):
+                be_stop = entry                                     # protected from the next candle on
+        if state["runner"] is None:
+            if not half:
+                if stopped(i, run_stop):
+                    state["runner"] = -1.0
+                elif not first and hit(i, tp1):
+                    half, run_stop = True, entry                    # half is banked at TP1, the rest is protected
+            else:
+                if stopped(i, run_stop):
+                    state["runner"] = 0.5 * rr1
+                elif rr2 is not None and hit(i, tp2):
+                    state["runner"] = 0.5 * rr1 + 0.5 * rr2
+                elif rr2 is None:
+                    state["runner"] = rr1                            # no second target: same as the baseline
+        prev = base["c"][i]
+        if all(v is not None for v in state.values()):
+            break
+    if any(v is None for v in state.values()):
+        return None
+    return state
+
+
+def replay(name, rows, wk, mo, days, style, fee_bp, slip_bp, min_conf, end_ts, cancelled=lambda: False, tick=lambda i, n: None,
+           shadow=False, btc_map=None, fund=None):
+    """Replay one asset. Returns (limit_trades, confirm_trades, logged, unresolved).
+    shadow=True also records the shadow features, the event-study measurement and the alternative exits for each setup."""
+    base = _cols(rows)
+    base["end"] = [t + 300 for t in base["t"]]
+    frames = _frames(base, wk, mo)
+    first, last, step = _steps(days, style, end_ts)
     steps = max(1, (last - first) // step + 1)
     life, hold = journal.LIFE[style], journal.MAX_OPEN[style]
     cost_pct = 2 * (fee_bp + slip_bp) / 100.0
@@ -250,12 +443,7 @@ def replay(name, rows, wk, mo, days, style, fee_bp, slip_bp, min_conf, end_ts, c
     while T <= last:
         if cancelled():
             break
-        tfs = {}
-        for tf, d in frames.items():
-            hi = bisect.bisect_right(d["end"], T)
-            lo = max(0, hi - 300)
-            if hi - lo >= 5:
-                tfs[tf] = {key: d[key][lo:hi] for key in ("t", "o", "h", "l", "c", "v")}
+        tfs = _slice(frames, T)
         res = strategy.build(name, "crypto", style, tfs, None, None, T, None)
         s = res.get("setup") if not res.get("error") else None
         if s and s["direction"] != "none" and s.get("poi") and s.get("factors") and s["confidence"] >= min_conf:
@@ -269,7 +457,23 @@ def replay(name, rows, wk, mo, days, style, fee_bp, slip_bp, min_conf, end_ts, c
                           "conf_raw": s.get("conf_raw", s["confidence"]), "poi": s["poi"]["type"], "poi_tf": s["poi"]["tf"],
                           "confluence": list(s["poi"]["confluence"]), "dist_atr": round(s["poi"].get("dist_atr") or 0, 2),
                           "stop_atr": round(s["risk"]["stop_atr"], 2), "rr1": round(s["risk"]["rr1"], 2),
-                          "factors": {f["key"]: f["pts"] for f in s["factors"]}, "status0": s["status"], "signal": True}
+                          "factors": {f["key"]: f["pts"] for f in s["factors"]}, "status0": s["status"], "signal": True,
+                          "stop_pct": round(s["risk"]["stop_pct"], 3)}
+                d_sig = 1 if s["direction"] == "long" else -1
+                ev = None
+                if shadow:
+                    bt = (btc_map or {}).get(T) if name != "BTC" else None
+                    common["feat"] = strategy.shadow_features(res, _funding_at(fund, T), {"bias": bt[0], "setup": bt[1]} if bt else None)
+                    jt = _touch(base, i0, z["low"], z["high"], life // 300)
+                    atr_pct = (s["risk"].get("atr_pct") or 0) / 100.0
+                    if jt is not None and jt < len(t5) - 2 and atr_pct > 0:
+                        ref = base["c"][jt]                    # measured from the close of the touch candle, like a random moment
+                        rng = random.Random(zlib.crc32(f"{name}{int(T)}".encode()))
+                        rj, dr = rng.randrange(i0, max(i0 + 1, len(t5) - 300)), rng.choice((1, -1))
+                        pj = base["c"][rj]
+                        ev = {"fp": _first_passage(base, jt, ref, ref * atr_pct, d_sig),
+                              "rb": _first_passage(base, rj, pj, pj * atr_pct, dr)}
+                common["ev"] = ev
                 # --- blind limit order at the zone midpoint
                 row = _row(T, s["direction"], s["entry"], s["stop"], s["tp1"]["price"], style)
                 horizon = T + life + hold
@@ -292,6 +496,12 @@ def replay(name, rows, wk, mo, days, style, fee_bp, slip_bp, min_conf, end_ts, c
                                    stop_pct=round(abs(row["entry"] - row["stop"]) / row["entry"] * 100, 3), closed_ts=row["closed_ts"],
                                    act_ts=row.get("activated_ts"), b_r=None if bl is None else round(bl[0], 3),
                                    b_win=None if bl is None else bl[1])
+                        if shadow and ia < len(t5) and row.get("activated_ts"):
+                            _, cost_r = _net(row, cost_pct, row["entry"], row["stop"])
+                            vs = _exit_variants(base, ia, d_sig, row["entry"], row["stop"], row["tp1"], s["tp2"]["price"], style,
+                                                row["activated_ts"], end_ts)
+                            if vs:
+                                rec["exits"] = {k: round(v - cost_r, 3) for k, v in vs.items() if k != "plain"}
                     else:
                         rec.update(result=row["result"], unfilled=True)
                     limit_t.append(rec)
@@ -507,6 +717,23 @@ def load_trades(job_id, mode="limit"):
     return data.get(mode, []) if isinstance(data, dict) else data
 
 
+def event_study(trades):
+    """Do zones cause a reaction? After price first touches a zone, how often does it move +k ATR in the trade direction
+    before -k ATR, compared with random moments and random directions? Independent of stops, targets and fees."""
+    evs = [t["ev"] for t in trades if t.get("ev")]
+    rows = []
+    for k in ("0.5", "1.0", "2.0"):
+        z = [e["fp"][k] for e in evs if e["fp"].get(k) is not None]
+        r = [e["rb"][k] for e in evs if e["rb"].get(k) is not None]
+        if len(z) < 5 or len(r) < 5:
+            continue
+        pz, pr = sum(z) / len(z), sum(r) / len(r)
+        se = math.sqrt(pz * (1 - pz) / len(z) + pr * (1 - pr) / len(r))
+        rows.append({"k": float(k), "n_zone": len(z), "n_rand": len(r), "p_zone": round(pz * 100, 1), "p_rand": round(pr * 100, 1),
+                     "diff": round((pz - pr) * 100, 1), "z": round((pz - pr) / se, 2) if se > 0 else None})
+    return {"events": len(evs), "rows": rows}
+
+
 def refresh_job(job_id):
     """Recompute a finished job's summaries from its saved trades with the current statistics (like-for-like coin flip)."""
     try:
@@ -533,6 +760,8 @@ def refresh_job(job_id):
         job[key] = new
     job["overall"] = group(lim, extras=True)
     job["overall_confirm"] = group(conf, extras=True)
+    if job["params"].get("shadow"):
+        job["event_study"] = event_study(lim)
     for key, src in (("by_asset", "assets"), ("by_asset_confirm", "assets_confirm")):
         job[key] = sorted(({"name": n, **(r.get("all") or {})} for n, r in job[src].items() if "all" in r),
                           key=lambda x: -(x.get("total_net_r") or 0))
@@ -553,7 +782,7 @@ def slim(job):
 SUMMARY_VERSION = 2          # 2 = the coin-flip baseline uses only filled trades (entered at the fill time for new runs)
 
 
-def start(days=90, style="intraday", assets=None, fee_bp=5.0, slip_bp=2.0, min_conf=0, offset_days=0, rules="r2"):
+def start(days=90, style="intraday", assets=None, fee_bp=5.0, slip_bp=2.0, min_conf=0, offset_days=0, rules="r2", shadow=True):
     cur = latest()
     if cur and cur.get("status") == "running":
         raise RuntimeError("a backtest is already running")
@@ -569,7 +798,7 @@ def start(days=90, style="intraday", assets=None, fee_bp=5.0, slip_bp=2.0, min_c
     job = {"id": time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4], "status": "running", "started": time.time(),
            "params": {"days": days, "offset_days": offset_days, "style": style, "assets": names, "fee_bp": float(fee_bp),
                       "slip_bp": float(slip_bp), "min_conf": int(min_conf),
-                      "rules": strategy.rules_version(rules), "ruleset": rules},
+                      "rules": strategy.rules_version(rules), "ruleset": rules, "shadow": bool(shadow)},
            "progress": {"done": 0, "total": len(names), "current": None, "pct": 0}, "assets": {}, "assets_confirm": {}}
     _save(job)
     DIR.mkdir(parents=True, exist_ok=True)
@@ -628,6 +857,20 @@ def worker(job_id):
     end_ts = int(time.time() // 300 * 300) - p.get("offset_days", 0) * 86400
     job["end_ts"] = end_ts
     all_limit, all_conf = [], []
+    shadow = bool(p.get("shadow"))
+    btc_map = None
+    try:
+        if shadow and any(n != "BTC" for n in p["assets"]):
+            try:
+                btc_map = btc_trend_map(p["days"], p["style"], end_ts)
+            except Banned:
+                raise
+            except Exception:
+                btc_map = None                                   # the BTC-alignment feature is then simply missing
+    except BaseException as e:
+        job["status"], job["error"] = "failed", str(e)[:200]
+        _wsave(job)
+        return
     try:
         for i, name in enumerate(p["assets"]):
             cur = json.loads(_path(job_id).read_text())
@@ -649,8 +892,16 @@ def worker(job_id):
                 rows, wk, mo = load_data(name, p["days"], time.time(), p.get("offset_days", 0))
                 if len(rows) < 2000:
                     raise RuntimeError("not enough history")
+                fund = []
+                if shadow:
+                    try:
+                        fund = fetch_funding(name + "USDT", (end_ts - (p["days"] + WARMUP_DAYS) * 86400) * 1000, end_ts * 1000)
+                    except Banned:
+                        raise
+                    except Exception:
+                        fund = []
                 lt, ct, logged, unresolved = replay(name, rows, wk, mo, p["days"], p["style"], p["fee_bp"], p["slip_bp"],
-                                                    p["min_conf"], end_ts, cancelled, tick)
+                                                    p["min_conf"], end_ts, cancelled, tick, shadow, btc_map, fund)
                 res = group(lt)
                 res["unresolved"] = unresolved
                 job["assets"][name] = res
@@ -670,6 +921,8 @@ def worker(job_id):
         for key, src in (("by_asset", "assets"), ("by_asset_confirm", "assets_confirm")):
             job[key] = sorted(({"name": n, **(r.get("all") or {})} for n, r in job[src].items() if "all" in r),
                               key=lambda x: -(x.get("total_net_r") or 0))
+        if shadow:
+            job["event_study"] = event_study(all_limit)
         job["status"], job["finished"] = "done", time.time()
         job["summary_version"], job["baseline_basis"] = SUMMARY_VERSION, "fill"
         job["progress"].update({"done": len(p["assets"]), "pct": 100, "current": None})

@@ -3,12 +3,12 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from . import backtest, bot, econ, engine, events, hypotheses, journal, market, prefs, push, strategy, tz, watcher, config as C
+from . import backtest, bot, digest, econ, engine, events, hypotheses, journal, market, prefs, push, security, strategy, tz, watcher, config as C
 
 
 @asynccontextmanager
 async def lifespan(app):
-    tasks = [asyncio.create_task(fn()) for fn in (watcher.run, push.run, econ.run, journal.run)]
+    tasks = [asyncio.create_task(fn()) for fn in (watcher.run, push.run, econ.run, journal.run, digest.run)]
     yield
     for t in tasks:
         t.cancel()
@@ -181,6 +181,7 @@ class PrefsIn(BaseModel):
     analyst: dict | None = None
     general: dict | None = None
     setups: dict | None = None
+    digest: dict | None = None
 
 
 def _prefs_view(p):
@@ -221,7 +222,20 @@ async def diagnostics():
     return {"time": int(time.time()), "service": bot.service_state(), "halted": st["halted"],
             "events": {"last_id": events.last_id()}, "push": push.info(), "calendar": econ.diag(), "timezone": tz.info(),
             "journal": journal.counts(), "rate_limit": {"until": getattr(market, "_ban", {}).get("until", 0),
-                                                         "why": getattr(market, "_ban", {}).get("why", "")}}
+                                                         "why": getattr(market, "_ban", {}).get("why", "")},
+            "security": await asyncio.to_thread(security.status), "digest": digest._load()}
+
+
+@api.get("/digest")
+async def digest_get():
+    """The weekly digest as text (built now)."""
+    return {"text": await asyncio.to_thread(digest.build), "settings": prefs.get()["digest"], "last": digest._load()}
+
+
+@api.post("/digest/send")
+async def digest_send():
+    """Send the digest now (it is logged as an event and pushed like the weekly one)."""
+    return {"text": await asyncio.to_thread(digest.send)}
 
 
 # --------------------------------------------------------- economic calendar
@@ -317,12 +331,13 @@ class BacktestIn(BaseModel):
     slip_bp: float = 2.0
     min_conf: int = 0
     rules: str = "r2"
+    shadow: bool = True
 
 
 @api.post("/backtest/start")
 async def backtest_start(b: BacktestIn):
     try:
-        return backtest.start(b.days, b.style, [a.upper() for a in b.assets] if b.assets else None, b.fee_bp, b.slip_bp, b.min_conf, b.offset_days, b.rules)
+        return backtest.start(b.days, b.style, [a.upper() for a in b.assets] if b.assets else None, b.fee_bp, b.slip_bp, b.min_conf, b.offset_days, b.rules, b.shadow)
     except RuntimeError as ex:
         raise HTTPException(409, str(ex))
     except ValueError as ex:

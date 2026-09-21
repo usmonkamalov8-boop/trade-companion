@@ -5,12 +5,12 @@ category is enabled in the app's Settings is sent to your private topic. The ntf
 shows the banner even when Trade Companion is closed."""
 import asyncio, json, os, time
 import httpx
-from . import events, prefs, config as C
+from . import events, prefs, tz, config as C
 
 STATE = C.BASE / "push_state.json"
 _TITLES = {"position": "Position update", "trade": "Trade update", "command": "Bot control action",
            "service": "Bot service change", "warning": "Alert", "news": "News alert",
-           "risk": "Risk change", "profile": "Profile change", "system": "System message", "setup": "Trade setup"}
+           "risk": "Risk change", "profile": "Profile change", "system": "System message", "setup": "Trade setup", "digest": "Weekly digest"}
 
 
 def cfg():
@@ -40,6 +40,63 @@ def should_push(e, c):
     return bool(c["kinds"].get(e["kind"], False)) or e["level"] == "error"
 
 
+def _state():
+    try:
+        return json.loads(STATE.read_text())
+    except Exception:
+        return {}
+
+
+def _save_state(d):
+    try:
+        STATE.write_text(json.dumps(d))
+    except Exception:
+        pass
+
+
+def _mins(hm):
+    h, m = hm.split(":")
+    return int(h) * 60 + int(m)
+
+
+def in_quiet(now=None):
+    """Are we inside the quiet hours from Settings (in the user's time zone, may wrap midnight)?"""
+    q = prefs.get()["setups"]["quiet"]
+    if not q.get("enabled"):
+        return False
+    d = tz.local(now or time.time())[0]
+    cur, a, b = d.hour * 60 + d.minute, _mins(q["from"]), _mins(q["to"])
+    if a == b:
+        return False
+    return a <= cur < b if a < b else (cur >= a or cur < b)
+
+
+def policy(body, e, now=None):
+    """Quiet hours silence setup pushes (priority 1); a daily cap turns extra 'high' pushes into normal ones.
+    Urgent READY alerts always sound outside quiet hours; inside them only if 'allow urgent' is on."""
+    if e.get("kind") != "setup":
+        return body
+    st = prefs.get()["setups"]
+    prio = body["priority"]
+    if in_quiet(now):
+        if not (st["quiet"].get("allow_urgent") and prio == 5):
+            body["priority"] = 1
+            return body
+    cap = st.get("loud_cap", 3)
+    if prio >= 4:
+        s = _state()
+        today = tz.local(now or time.time())[0].date().isoformat()
+        loud = s.get("loud") or {}
+        n = loud.get("n", 0) if loud.get("day") == today else 0
+        if prio == 4 and cap and n >= cap:
+            body["priority"] = 3
+            body["message"] = (body["message"] + " (daily limit for loud alerts reached)")[:400]
+        else:
+            s["loud"] = {"day": today, "n": n + 1}
+            _save_state(s)
+    return body
+
+
 def setup_priority(e, c=None):
     """ntfy priority (1-5) for a setup alert from its confidence: 5 = urgent (loudest, can break through Do Not
     Disturb), 4 = high, 3 = default, 2 = quiet. Each level has its own Android notification channel in the ntfy app,
@@ -48,12 +105,13 @@ def setup_priority(e, c=None):
     s = prefs.get()["setups"]["sound"]
     m = re.search(r"(?:confidence |, )(\d{1,3})\b", e["title"])
     prio = 3
+    ready = e.get("level") == "success"                 # READY: price in the zone with confirmation, no news hold
     if s.get("enabled", True) and m:
         conf = int(m.group(1))
         prio = 5 if conf >= s["urgent_from"] else 4 if conf >= s["high_from"] else 3 if conf >= s["quiet_below"] else 2
-    if s.get("urgent_needs_ready", True) and prio == 5 and e["title"].startswith("New "):
-        prio = 4                    # a setup that price has not reached yet is worth a look, not an alarm
-    if e.get("level") == "success":
+    if prio == 5 and not ready:
+        prio = 4                    # urgent means READY: a setup price has not reached yet is worth a look, not an alarm
+    if ready:
         prio = max(prio, 4)
     return prio
 
@@ -73,6 +131,9 @@ def build(e, c):
              "error": "rotating_light"}.get(e["level"], "information_source")]
     if e["kind"] == "news":
         tags = ["newspaper", "warning"]
+    elif e["kind"] == "digest":
+        tags = ["bar_chart"]
+        prio = 2                                    # informational: no sound
     elif e["kind"] == "setup":
         trend = "chart_with_downwards_trend" if " SHORT" in e["title"] else "chart_with_upwards_trend"
         prio = setup_priority(e, c)
@@ -82,7 +143,7 @@ def build(e, c):
     elif "resumed" in low:
         tags = ["arrow_forward"]
     return {"topic": c["topic"], "title": title[:120],
-            "message": (text or "Open Trade Companion for details.")[:400],
+            "message": (text or "Open Trade Companion for details.")[:1500 if e["kind"] == "digest" else 400],
             "priority": prio, "tags": tags}
 
 
@@ -113,7 +174,9 @@ def _load_last():
 
 
 def _save_last(n):
-    STATE.write_text(json.dumps({"last": n}))
+    s = _state()
+    s["last"] = n
+    _save_state(s)
 
 
 async def run():
@@ -132,7 +195,7 @@ async def run():
                 todo = [e for e in rows if enabled(c) and should_push(e, c)]
                 if len(todo) > 5:  # a burst: send four, then one summary
                     for e in todo[:4]:
-                        await _post(build(e, c), c)
+                        await _post(policy(build(e, c), e), c)
                         await asyncio.sleep(0.3)
                     await _post({"topic": c["topic"], "title": f"{len(todo) - 4} more events",
                                  "message": "Open Trade Companion > Activity to see them.",
@@ -142,7 +205,7 @@ async def run():
                 else:
                     for e in rows:
                         if enabled(c) and should_push(e, c):
-                            await _post(build(e, c), c)
+                            await _post(policy(build(e, c), e), c)
                             await asyncio.sleep(0.3)
                         last = e["id"]
                         _save_last(last)

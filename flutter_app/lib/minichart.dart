@@ -280,8 +280,8 @@ class _CandlePainter extends CustomPainter {
 class MiniChartPanel extends StatefulWidget {
   final String name, style;
   final String initialTf;
-  final VoidCallback? onReport, onXray;
-  const MiniChartPanel({super.key, required this.name, required this.style, this.initialTf = '1h', this.onReport, this.onXray});
+  final VoidCallback? onReport, onXray, onCalc;
+  const MiniChartPanel({super.key, required this.name, required this.style, this.initialTf = '1h', this.onReport, this.onXray, this.onCalc});
   @override
   State<MiniChartPanel> createState() => _MiniChartPanelState();
 }
@@ -398,9 +398,11 @@ class _MiniChartPanelState extends State<MiniChartPanel> {
           _legend(p),
         ],
         const SizedBox(height: 4),
-        Row(children: [
+        Wrap(children: [
           TextButton.icon(onPressed: widget.onReport, icon: const Icon(Icons.article_outlined, size: 18), label: const Text('Full report')),
           TextButton.icon(onPressed: widget.onXray, icon: const Icon(Icons.troubleshoot, size: 18), label: const Text('Trade X-Ray')),
+          if (widget.onCalc != null)
+            TextButton.icon(onPressed: widget.onCalc, icon: const Icon(Icons.calculate_outlined, size: 18), label: const Text('Position size')),
         ]),
       ]),
     );

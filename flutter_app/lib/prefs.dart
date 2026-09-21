@@ -10,6 +10,7 @@ const kindLabels = {
   'warning': 'Warnings (liquidation, API problems)',
   'news': 'Red-folder news alerts',
   'setup': 'New trade setups and zone alerts',
+  'digest': 'Weekly digest',
   'risk': 'Risk changes',
   'profile': 'Profile on / off',
   'system': 'System messages',

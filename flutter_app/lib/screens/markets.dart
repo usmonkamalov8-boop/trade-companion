@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../api.dart';
+import '../calc.dart';
 import '../minichart.dart';
 import '../prefs.dart';
 import '../theme.dart';
@@ -418,6 +419,7 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
               initialTf: setupTf,
               onReport: () => _detail(index),
               onXray: () => _detail(index, focus: 'xray'),
+              onCalc: r['calc'] == null ? null : () => showPositionCalc(context, symbol: name, calc: (r['calc'] as Map).cast<String, dynamic>()),
             ),
         ]),
       ),
