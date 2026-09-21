@@ -305,6 +305,38 @@ class _NotificationsPageState extends State<NotificationsPage> {
     }
   }
 
+  Future<void> _testProvider(String provider) async {
+    try {
+      await Api.post('/api/push/test?priority=3&provider=$provider');
+      if (mounted) {
+        setState(() {
+          ok = true;
+          msg = 'Test sent through $provider. Close the app and check your phone.';
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          ok = false;
+          msg = '$e';
+        });
+      }
+    }
+    _info();
+  }
+
+  String _provLine(String name, Map? v, String setupHint) {
+    if (v == null || v['configured'] != true) return '$name: not set up. $setupHint';
+    final until = ((v['paused_until'] as num?) ?? 0).toInt();
+    final sent = 'sent today: ${v['sent_today'] ?? 0}';
+    if (until > 0) {
+      final d = DateTime.fromMillisecondsSinceEpoch(until * 1000, isUtc: true);
+      final hm = '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')} UTC';
+      return '$name: PAUSED until $hm ($sent). ${v['error'] ?? ''}';
+    }
+    return '$name: working ($sent)${v['error'] != null ? '. Last error: ${v['error']}' : ''}';
+  }
+
   Future<void> _testLevel(int level) async {
     try {
       await Api.post('/api/push/test?priority=$level');
@@ -771,6 +803,47 @@ class _NotificationsPageState extends State<NotificationsPage> {
                     value: kinds[e.key] == true,
                     onChanged: pushOn ? (v) => ServerPrefs.I.update({'push': {'kinds': {e.key: v}}}) : null,
                   ),
+              ]),
+            ),
+            const Heading('Delivery route'),
+            Panel(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(
+                    'The free ntfy.sh server allows 250 messages a day per server IP and then answers 429. With a Telegram bot as a second '
+                    'route, alerts keep arriving.',
+                    style: TextStyle(color: p.muted, fontSize: 12.5, height: 1.4)),
+                const SizedBox(height: 8),
+                Wrap(spacing: 8, children: [
+                  for (final r in const [
+                    ['auto', 'Auto'],
+                    ['ntfy', 'ntfy only'],
+                    ['telegram', 'Telegram only'],
+                    ['both', 'Both'],
+                  ])
+                    ChoiceChip(
+                      label: Text(r[1]),
+                      selected: (push['route'] ?? 'auto') == r[0],
+                      onSelected: (_) => ServerPrefs.I.update({'push': {'route': r[0]}}),
+                    ),
+                ]),
+                const SizedBox(height: 4),
+                Text(
+                    (push['route'] ?? 'auto') == 'auto'
+                        ? 'Auto: ntfy first; Telegram whenever ntfy fails or is paused.'
+                        : ((push['route'] == 'both') ? 'Both: every alert goes to ntfy and to Telegram.' : 'Only ${push['route']} is used.'),
+                    style: TextStyle(color: p.muted, fontSize: 12)),
+                const SizedBox(height: 8),
+                Text(_provLine('ntfy', (info?['providers'] as Map?)?['ntfy'] as Map?, 'Set NTFY_TOPIC in backend/.env.'),
+                    style: TextStyle(fontSize: 12.5, color: (((info?['providers'] as Map?)?['ntfy'] as Map?)?['paused_until'] ?? 0) != 0 ? p.warn : p.muted)),
+                const SizedBox(height: 4),
+                Text(_provLine('Telegram', (info?['providers'] as Map?)?['telegram'] as Map?, 'On the VPS run: python3 ~/tc_push.py telegram'),
+                    style: TextStyle(fontSize: 12.5, color: (((info?['providers'] as Map?)?['telegram'] as Map?)?['paused_until'] ?? 0) != 0 ? p.warn : p.muted)),
+                const SizedBox(height: 8),
+                Row(children: [
+                  Expanded(child: OutlinedButton(onPressed: () => _testProvider('ntfy'), child: const Text('Test ntfy'))),
+                  const SizedBox(width: 8),
+                  Expanded(child: OutlinedButton(onPressed: () => _testProvider('telegram'), child: const Text('Test Telegram'))),
+                ]),
               ]),
             ),
             Panel(
@@ -1291,6 +1364,17 @@ class _DiagnosticsPageState extends State<DiagnosticsPage> {
                   color: push?['enabled'] == true ? p.gain : p.warn),
               _kv(p, 'Server', '${push?['server']}'),
               _kv(p, 'Detail', '${push?['detail']}'),
+              _kv(p, 'Route', '${push?['route'] ?? 'auto'}'),
+              for (final e in ((push?['providers'] as Map?) ?? {}).entries)
+                _kv(
+                    p,
+                    '${e.key}',
+                    (e.value['configured'] != true)
+                        ? 'not set up'
+                        : (((e.value['paused_until'] as num?) ?? 0) > 0
+                            ? 'PAUSED (${e.value['error'] ?? ''})'
+                            : 'working, sent today ${e.value['sent_today'] ?? 0}'),
+                    color: (e.value['configured'] != true) ? p.muted : (((e.value['paused_until'] as num?) ?? 0) > 0 ? p.warn : p.gain)),
             ]),
           ),
           const Heading('Economic calendar'),

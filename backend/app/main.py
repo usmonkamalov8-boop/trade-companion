@@ -163,10 +163,11 @@ async def push_info():
 
 
 @api.post("/push/test")
-async def push_test(priority: int = Query(3, ge=1, le=5)):
-    """Send a test push at a given ntfy priority (1-5) so each level can be given its own sound."""
+async def push_test(priority: int = Query(3, ge=1, le=5), provider: str = Query("")):
+    """Send a test push at a given ntfy priority (1-5) so each level can be given its own sound.
+    provider=ntfy or telegram tests that provider alone."""
     try:
-        await push.send_test(priority)
+        await push.send_test(priority, provider or None)
     except Exception as e:
         raise HTTPException(502, f"Push failed: {e}")
     return {"ok": True}

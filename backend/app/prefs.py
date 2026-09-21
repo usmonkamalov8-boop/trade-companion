@@ -36,7 +36,8 @@ def defaults():
     return {
         "push": {"enabled": os.getenv("PUSH_ENABLED", "1").strip() != "0",
                  "detail": "minimal" if os.getenv("PUSH_DETAIL", "full").strip().lower() == "minimal" else "full",
-                 "kinds": {k: (k in on or k in ("setup", "digest")) for k in KINDS}},
+                 "kinds": {k: (k in on or k in ("setup", "digest")) for k in KINDS},
+                 "route": "auto", "ntfy_budget": 200},
         "calendar": {"alerts": os.getenv("CAL_ALERTS", "1").strip() != "0",
                      "impact": "medium" if imp == "medium" else "high",
                      "currencies": [c for c in cur if c in CURRENCIES] or ["USD", "EUR", "GBP", "JPY"],
@@ -91,6 +92,11 @@ def _clean(p):
             o["detail"] = push["detail"]
         if isinstance(push.get("kinds"), dict):
             o["kinds"] = {k: bool(v) for k, v in push["kinds"].items() if k in KINDS}
+        if push.get("route") in ("auto", "ntfy", "telegram", "both"):
+            o["route"] = push["route"]
+        b = push.get("ntfy_budget")
+        if isinstance(b, (int, float)) and not isinstance(b, bool):
+            o["ntfy_budget"] = max(0, min(250, int(b)))
         out["push"] = o
     cal = p.get("calendar") or {}
     if isinstance(cal, dict):

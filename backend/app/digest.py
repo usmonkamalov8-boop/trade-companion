@@ -3,7 +3,7 @@
 It only reports; it never changes a rule. Numbers carry 95% ranges, and small samples say so."""
 import asyncio, json, math, os, time
 from pathlib import Path
-from . import config as C, events, hypotheses, journal, prefs, tz
+from . import config as C, events, hypotheses, journal, prefs, push, tz
 
 STATE = C.BASE / "digest_state.json"
 SNAP_DIR = Path.home() / "tc_backups"
@@ -80,6 +80,15 @@ def build(days=7):
         wait = [h["id"] for h in hv if h["cls"] == "wait"]
         L += ["", "Hypotheses: " + (f"confirmed {', '.join(good)}" if good else "none confirmed yet")
               + (f"; reversed {', '.join(rev)}" if rev else "") + (f"; waiting for test runs: {', '.join(wait)}" if wait else "") + "."]
+    except Exception:
+        pass
+    try:
+        pi = push.info()
+        parts = []
+        for name, v in pi["providers"].items():
+            parts.append(f"{name} not set up" if not v["configured"] else
+                         (f"{name} PAUSED ({(v['error'] or '')[:60]})" if v["paused_until"] else f"{name} ok, {v['sent_today']} sent today"))
+        L += ["", f"Push delivery (route {pi['route']}): " + "; ".join(parts)]
     except Exception:
         pass
     L += ["", _backup_line()]
