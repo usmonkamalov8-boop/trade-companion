@@ -238,7 +238,7 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
           _stat(p, pf == null ? '-' : (pf as num).toStringAsFixed(2), 'profit factor'),
         ]),
         const SizedBox(height: 2),
-        Text('${s['filled']} trades (${s['wins']} wins, ${s['losses']} stops)  -  max drawdown ${(s['max_dd_r'] as num).toStringAsFixed(1)}R  -  fill rate ${_pct(s['fill_rate'])}',
+        Text('${s['filled']} trades (${s['wins']} wins, ${s['losses']} stops)  -  max drawdown ${(s['max_dd_r'] as num).toStringAsFixed(1)}R${mode == 'limit' ? '  -  fill rate ${_pct(s['fill_rate'])}' : ''}',
             style: TextStyle(color: p.muted, fontSize: 11.5)),
         if (wci != null && aci != null)
           Text('95% range: win rate ${(wci[0] as num).toStringAsFixed(0)}-${(wci[1] as num).toStringAsFixed(0)}%, '
@@ -455,7 +455,7 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
             ),
             _rows(p, 'BY ASSET (BEST FIRST)', byAsset, byAsset: true),
             _rows(p, 'BY CONFIDENCE (SETUP QUALITY)', (ov['by_conf'] as List?) ?? []),
-            _distRows(p, (ov['by_dist'] as List?) ?? []),
+            if (mode == 'limit') _distRows(p, (ov['by_dist'] as List?) ?? []),
             _ablation(p, (ov['ablation'] as List?) ?? []),
             _rows(p, 'BY TIME (STABLE OVER TIME?)', (ov['by_third'] as List?) ?? []),
             _rows(p, 'BY ZONE TYPE', (ov['by_poi'] as List?) ?? []),
