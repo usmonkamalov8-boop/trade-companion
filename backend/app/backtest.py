@@ -8,8 +8,8 @@ then follows price candle by candle with the same rules as the live setup journa
 - Win = TP1 before the stop (R = planned reward to TP1). Loss = -1R. Fees and slippage are subtracted.
 - Two ways to enter are replayed side by side: "limit" (a resting order at the zone midpoint) and "confirm" (wait until
   price is in the zone AND a 5-minute CHoCH/BOS in the trade direction appears, then enter at that close).
-- Every setup is compared with a coin-flip baseline: same stop and target distances, entered at market at the same time,
-  averaged over long and short. A strategy only has an edge if it beats that baseline.
+- Every FILLED trade is compared with a coin-flip baseline: same stop and target distances, entered at market at the
+  moment the order filled, averaged over long and short. A strategy only has an edge if it beats that baseline.
 - Results carry 95% ranges and a verdict, so a small sample cannot pass for proof.
 - Not modelled: news filtering, funding, partial exits, order-book depth. Forex is not supported (no real volume).
 
@@ -279,15 +279,19 @@ def replay(name, rows, wk, mo, days, style, fee_bp, slip_bp, min_conf, end_ts, c
                 row.update(journal.advance(row, fut, 300, now))
                 sd = abs(s["entry"] - s["stop"])
                 td = abs(s["tp1"]["price"] - s["entry"])
-                bl = _baseline(base, i0, style, sd, td, base["o"][i0], cost_pct, end_ts, T) if i0 < len(t5) else None
                 if row["state"] != "closed" and now < horizon:
                     unresolved += 1
                 else:
-                    rec = dict(common, b_r=None if bl is None else round(bl[0], 3), b_win=None if bl is None else bl[1])
+                    rec = dict(common)
                     if row["result"] in ("win", "loss", "timeout"):
                         net, _ = _net(row, cost_pct, row["entry"], row["stop"])
+                        # coin flip taken at the same moment the strategy's order filled, with the same stop and target distances
+                        ia = bisect.bisect_left(t5, row["activated_ts"]) if row.get("activated_ts") else i0
+                        bl = _baseline(base, ia, style, sd, td, base["o"][ia], cost_pct, end_ts, t5[ia]) if ia < len(t5) else None
                         rec.update(result=row["result"], r=round(row["r_result"], 3), net_r=round(net, 3),
-                                   stop_pct=round(abs(row["entry"] - row["stop"]) / row["entry"] * 100, 3), closed_ts=row["closed_ts"])
+                                   stop_pct=round(abs(row["entry"] - row["stop"]) / row["entry"] * 100, 3), closed_ts=row["closed_ts"],
+                                   act_ts=row.get("activated_ts"), b_r=None if bl is None else round(bl[0], 3),
+                                   b_win=None if bl is None else bl[1])
                     else:
                         rec.update(result=row["result"], unfilled=True)
                     limit_t.append(rec)
@@ -361,7 +365,7 @@ def summarize(trades):
     else:
         verdict = "inconclusive"
     # coin-flip baseline over every setup in the group (filled or not): what a random entry with the same risk would do
-    bl = [t for t in trades if t.get("b_r") is not None]
+    bl = [t for t in filled if t.get("b_r") is not None]        # like for like: only the trades that actually filled
     bm, bsd = _mean_sd([t["b_r"] for t in bl])
     baseline = None
     edge = edge_z = None
@@ -503,6 +507,41 @@ def load_trades(job_id, mode="limit"):
     return data.get(mode, []) if isinstance(data, dict) else data
 
 
+def refresh_job(job_id):
+    """Recompute a finished job's summaries from its saved trades with the current statistics (like-for-like coin flip)."""
+    try:
+        job = json.loads(_path(job_id).read_text())
+        with gzip.open(DIR / f"{job_id}_trades.json.gz", "rt") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    if job.get("status") != "done" or not isinstance(data, dict):
+        return job
+    lim, conf = data.get("limit", []), data.get("confirm", [])
+    for key, src in (("assets", lim), ("assets_confirm", conf)):
+        old = job.get(key, {})
+        new = {}
+        for n in job["params"]["assets"]:
+            mine = [t for t in src if t.get("name") == n]
+            if mine:
+                g = group(mine)
+                if "unresolved" in old.get(n, {}):
+                    g["unresolved"] = old[n]["unresolved"]
+                new[n] = g
+            elif n in old:
+                new[n] = old[n]
+        job[key] = new
+    job["overall"] = group(lim, extras=True)
+    job["overall_confirm"] = group(conf, extras=True)
+    for key, src in (("by_asset", "assets"), ("by_asset_confirm", "assets_confirm")):
+        job[key] = sorted(({"name": n, **(r.get("all") or {})} for n, r in job[src].items() if "all" in r),
+                          key=lambda x: -(x.get("total_net_r") or 0))
+    job["summary_version"] = SUMMARY_VERSION
+    job.setdefault("baseline_basis", "signal")           # older runs: coin flip entered when the setup appeared
+    _save(job)
+    return job
+
+
 def slim(job):
     """Job without the bulky per-asset detail, for the app's polling while a run is in progress."""
     if not job:
@@ -511,7 +550,10 @@ def slim(job):
     return {k: job[k] for k in keep if k in job}
 
 
-def start(days=90, style="intraday", assets=None, fee_bp=5.0, slip_bp=2.0, min_conf=0, offset_days=0):
+SUMMARY_VERSION = 2          # 2 = the coin-flip baseline uses only filled trades (entered at the fill time for new runs)
+
+
+def start(days=90, style="intraday", assets=None, fee_bp=5.0, slip_bp=2.0, min_conf=0, offset_days=0, rules="r2"):
     cur = latest()
     if cur and cur.get("status") == "running":
         raise RuntimeError("a backtest is already running")
@@ -522,10 +564,12 @@ def start(days=90, style="intraday", assets=None, fee_bp=5.0, slip_bp=2.0, min_c
     offset_days = max(0, min(int(offset_days), 730))
     if style not in strategy.STYLES:
         style = "intraday"
+    if rules not in strategy.RULE_SETS:
+        rules = "r2"
     job = {"id": time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4], "status": "running", "started": time.time(),
            "params": {"days": days, "offset_days": offset_days, "style": style, "assets": names, "fee_bp": float(fee_bp),
                       "slip_bp": float(slip_bp), "min_conf": int(min_conf),
-                      "rules": strategy.RULES_VERSION},
+                      "rules": strategy.rules_version(rules), "ruleset": rules},
            "progress": {"done": 0, "total": len(names), "current": None, "pct": 0}, "assets": {}, "assets_confirm": {}}
     _save(job)
     DIR.mkdir(parents=True, exist_ok=True)
@@ -580,6 +624,7 @@ def worker(job_id):
     job.setdefault("assets", {})
     job.setdefault("assets_confirm", {})
     p = job["params"]
+    strategy.RULESET = p.get("ruleset", "r1" if str(p.get("rules", "")).startswith("r1") else "r2")
     end_ts = int(time.time() // 300 * 300) - p.get("offset_days", 0) * 86400
     job["end_ts"] = end_ts
     all_limit, all_conf = [], []
@@ -626,6 +671,7 @@ def worker(job_id):
             job[key] = sorted(({"name": n, **(r.get("all") or {})} for n, r in job[src].items() if "all" in r),
                               key=lambda x: -(x.get("total_net_r") or 0))
         job["status"], job["finished"] = "done", time.time()
+        job["summary_version"], job["baseline_basis"] = SUMMARY_VERSION, "fill"
         job["progress"].update({"done": len(p["assets"]), "pct": 100, "current": None})
         with gzip.open(DIR / f"{job_id}_trades.json.gz", "wt") as f:
             json.dump({"limit": all_limit[:30000], "confirm": all_conf[:30000]}, f)

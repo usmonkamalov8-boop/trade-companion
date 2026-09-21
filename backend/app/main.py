@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from . import backtest, bot, econ, engine, events, journal, market, prefs, push, strategy, tz, watcher, config as C
+from . import backtest, bot, econ, engine, events, hypotheses, journal, market, prefs, push, strategy, tz, watcher, config as C
 
 
 @asynccontextmanager
@@ -316,12 +316,13 @@ class BacktestIn(BaseModel):
     fee_bp: float = 5.0
     slip_bp: float = 2.0
     min_conf: int = 0
+    rules: str = "r2"
 
 
 @api.post("/backtest/start")
 async def backtest_start(b: BacktestIn):
     try:
-        return backtest.start(b.days, b.style, [a.upper() for a in b.assets] if b.assets else None, b.fee_bp, b.slip_bp, b.min_conf, b.offset_days)
+        return backtest.start(b.days, b.style, [a.upper() for a in b.assets] if b.assets else None, b.fee_bp, b.slip_bp, b.min_conf, b.offset_days, b.rules)
     except RuntimeError as ex:
         raise HTTPException(409, str(ex))
     except ValueError as ex:
@@ -334,7 +335,15 @@ async def backtest_status(detail: int = 1):
     job = backtest.latest()
     if not job:
         return {"status": "none"}
+    if detail and job.get("status") == "done" and job.get("summary_version", 1) < backtest.SUMMARY_VERSION:
+        job = await asyncio.to_thread(backtest.refresh_job, job["id"]) or job      # older run: recompute with the current statistics
     return job if detail else backtest.slim(job)
+
+
+@api.get("/hypotheses")
+async def hypotheses_status():
+    """The pre-registered hypotheses with a verdict from the unseen windows that have been run so far."""
+    return await asyncio.to_thread(hypotheses.evaluate)
 
 
 @api.post("/backtest/cancel")

@@ -2,7 +2,7 @@
 briefings and answers chat questions. No paid API, no LLM, no keys."""
 import asyncio, re, time
 from datetime import datetime, timezone
-from . import analytics as A, backtest, bot, journal, market, prefs, strategy, tz as TZ, config as C
+from . import analytics as A, backtest, bot, hypotheses, journal, market, prefs, strategy, tz as TZ, config as C
 
 _scan_cache = {}
 DISCLAIMER = "Rule-based analysis of live data. Not financial advice."
@@ -533,12 +533,15 @@ async def chart_data(name, tf, style=None, n=100):
 
 def backtest_text(name=None):
     job = backtest.latest_done() or backtest.latest()
+    if job and job.get("status") == "done" and job.get("summary_version", 1) < backtest.SUMMARY_VERSION:
+        job = backtest.refresh_job(job["id"]) or job              # older run: recompute with the like-for-like baseline
     if not job:
         return ("No backtest has been run yet. Start one in the app: Markets > Backtest (it replays 30-365 days "
                 "and takes a few minutes), or say \"run backtest\".")
     p = job["params"]
     off = f", ending {p['offset_days']} days ago" if p.get("offset_days") else ""
-    head = f"BACKTEST - {strategy.STYLES[p['style']]['label']}, {p['days']} days{off}, fees {p['fee_bp'] + p['slip_bp']:.0f} bp per side"
+    head = (f"BACKTEST - {strategy.STYLES[p['style']]['label']}, {p['days']} days{off}, fees {p['fee_bp'] + p['slip_bp']:.0f} bp per side, "
+            f"rules {p.get('rules', 'r1')}")
     if job["status"] == "running":
         pr = job["progress"]
         return f"{head}\nRunning: {pr['pct']}% ({pr.get('current') or '-'}, {pr['done']}/{pr['total']} assets). Check again in a few minutes."
@@ -892,6 +895,8 @@ async def answer(question, history=None):
                 f"Kill zones today ({TZ.label_now()}): " + "; ".join(f"{w['name']} {w['start']}-{w['end']}" for w in TZ.sessions()))
     if _has(ql, "heatmap", "heat map", "market sentiment", "sentiment map"):
         return await heatmap_text(_style_of(ql))
+    if _has(ql, "hypothes", "pre-registered", "preregistered"):
+        return await asyncio.to_thread(hypotheses.text)
     if _has(ql, "backtest", "back-test", "back test"):
         if _has(ql, "run", "start", "launch"):
             try:

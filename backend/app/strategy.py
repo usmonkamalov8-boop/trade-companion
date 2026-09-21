@@ -11,7 +11,19 @@ Everything is a mechanical approximation of discretionary concepts. It is analys
 from datetime import datetime, timedelta, timezone
 from . import analytics as A, tz as TZ
 
-RULES_VERSION = "r1-2026-09"      # bump ONLY when a scoring or entry rule changes; every backtest records it
+# Rule sets. r1 = the rules the first backtests ran on. r2 = r1 without the reward-to-risk bonus (hypothesis H3: setups
+# with a far first target were hit far less often than the bonus assumed; replicated on two windows, 4 of 4 comparisons).
+# The bonus only affects the confidence score, never which setups exist, their zones, stops or targets.
+# Bump the version ONLY when a scoring or entry rule changes; every backtest records the rule set it ran on.
+RULE_SETS = {"r1": "r1-2026-09", "r2": "r2-2026-09"}
+RULESET = "r2"
+
+
+def rules_version(ruleset=None):
+    return RULE_SETS.get(ruleset or RULESET, RULE_SETS["r2"])
+
+
+RULES_VERSION = RULE_SETS["r2"]
 
 STYLES = {
     "scalp": {"ctx": "4h", "bias": "1h", "setup": "15m", "trigger": "5m", "label": "Scalping", "reach": 4.0},
@@ -990,10 +1002,11 @@ def make_setup(name, style, per, ict, dec, mods, kind, per_all=None, news=None):
         elif bad_loc:
             add("loc", "Location", -6, f"{word.capitalize()} from {fib['zone']} of the {tfl(setup['tf'])} range (wrong side)")
             missing.append({"label": f"price trading into {'discount' if s == 1 else 'premium'} of the range", "pts": 12})
-    if tp1["rr"] >= 2 or tp2["rr"] >= 3:
-        add("rr", "Reward to risk", 8, f"TP1 {tp1['rr']:.1f}R, TP2 {tp2['rr']:.1f}R")
-    else:
-        missing.append({"label": "a structural target at 2R or better", "pts": 8})
+    if RULESET == "r1":                  # r2 dropped this bonus (H3): far targets are hit less often than they pay for
+        if tp1["rr"] >= 2 or tp2["rr"] >= 3:
+            add("rr", "Reward to risk", 8, f"TP1 {tp1['rr']:.1f}R, TP2 {tp2['rr']:.1f}R")
+        else:
+            missing.append({"label": "a structural target at 2R or better", "pts": 8})
     if tp1["rr"] < 1:
         add("rr_low", "Reward to risk below 1", -10, f"first target only {tp1['rr']:.1f}R")
     against = []

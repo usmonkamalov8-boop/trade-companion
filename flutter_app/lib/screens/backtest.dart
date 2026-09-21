@@ -31,6 +31,7 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
   String mode = 'limit';
   int fee = 5;
   Map<String, dynamic>? job;
+  Map<String, dynamic>? hyp;
   bool busy = false;
   String? err;
   Timer? timer;
@@ -43,6 +44,7 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
     super.initState();
     if (Api.ready) {
       _poll();
+      _loadHyp();
     } else {
       err = 'Enter your API token in Settings to connect.';
     }
@@ -68,6 +70,7 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
         err = null;
       });
       final running = slim['status'] == 'running';
+      if (slim['status'] == 'done' && (hyp == null || hypJob != slim['id'])) _loadHyp(slim['id'] as String?);
       if (running && timer == null) {
         timer = Timer.periodic(const Duration(seconds: 4), (_) => _poll());
       } else if (!running) {
@@ -78,6 +81,91 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
       if (mounted) setState(() => err = '$e');
     }
   }
+
+  String? hypJob;
+
+  Future<void> _loadHyp([String? forJob]) async {
+    try {
+      final h = await Api.get('/api/hypotheses') as Map<String, dynamic>;
+      if (mounted) {
+        setState(() {
+          hyp = h;
+          hypJob = forJob ?? hypJob;
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _runHyp(Map<String, dynamic> run) async {
+    setState(() {
+      busy = true;
+      err = null;
+    });
+    try {
+      await Api.post('/api/backtest/start', {
+        'days': run['days'],
+        'offset_days': run['offset_days'],
+        'style': run['style'],
+        'fee_bp': run['fee_bp'],
+        'slip_bp': run['slip_bp'],
+        'min_conf': run['min_conf'],
+        'rules': run['rules'],
+      });
+      job = null;
+      await _poll();
+    } catch (e) {
+      if (mounted) setState(() => err = '$e');
+    }
+    if (mounted) setState(() => busy = false);
+  }
+
+  Widget _hypPanel(Pal p) {
+    final hs = ((hyp?['hypotheses'] as List?) ?? []);
+    if (hs.isEmpty) return const SizedBox.shrink();
+    Color cc(String c) => c == 'pass' ? p.gain : (c == 'fail' ? p.loss : (c == 'open' ? p.warn : p.muted));
+    return Panel(
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('PRE-REGISTERED HYPOTHESES', style: TextStyle(color: p.muted, fontSize: 11, letterSpacing: 1, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 4),
+        Text('Each was written down before the data that tests it. Only unseen (test) windows decide a verdict.',
+            style: TextStyle(color: p.muted, fontSize: 11.5)),
+        const SizedBox(height: 8),
+        for (final raw in hs)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('${raw['id']}  ${raw['title']}', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5)),
+              const SizedBox(height: 2),
+              Text('${raw['verdict']}', style: TextStyle(color: cc('${raw['cls']}'), fontWeight: FontWeight.w700, fontSize: 12.5)),
+              for (final w in ((raw['windows'] as List?) ?? []))
+                Text(
+                  '${w['role'] == 'test' ? 'TEST' : 'seen'}  ${w['label']}: ' +
+                      (w['missing'] == true
+                          ? 'not run yet'
+                          : (w['note'] != null
+                              ? '${w['note']}'
+                              : (raw['kind'] == 'diff'
+                                  ? 'with bonus ${_r(w['avg_with'])} (${w['n_with']}) vs without ${_r(w['avg_without'])} (${w['n_without']})'
+                                  : ((w['n'] as num) == 0
+                                      ? 'no trades'
+                                      : '${w['n']} trades, average ${_r(w['avg'])} (95%: ${(w['lo'] as num).toStringAsFixed(2)} to ${(w['hi'] as num).toStringAsFixed(2)})')))),
+                  style: numStyle.copyWith(color: p.muted, fontSize: 11.5),
+                ),
+              if (raw['run'] != null)
+                TextButton.icon(
+                  onPressed: (busy || running) ? null : () => _runHyp((raw['run'] as Map).cast<String, dynamic>()),
+                  icon: const Icon(Icons.play_arrow, size: 18),
+                  label: Text('${(raw['run'] as Map)['label']}'),
+                ),
+            ]),
+          ),
+        Text('A confirmed hypothesis is evidence, not proof: it still needs a live journal that agrees.',
+            style: TextStyle(color: p.muted, fontSize: 11.5)),
+      ]),
+    );
+  }
+
+  bool get running => job?['status'] == 'running';
 
   Future<void> _start() async {
     setState(() {
@@ -158,7 +246,7 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
               style: TextStyle(color: p.muted, fontSize: 11.5)),
         if (base != null)
           Text(
-            'Coin-flip entry with the same risk: ${_r(base['avg_net_r'])} (${_pct(base['win_rate'])} wins).'
+            'Coin flip on the same ${base['n']} filled trades (same stop and target, entered ${job?['baseline_basis'] == 'signal' ? 'when the setup appeared' : 'at the fill time'}): ${_r(base['avg_net_r'])} (${_pct(base['win_rate'])} wins).'
             '${edge != null ? '  Strategy vs coin flip: ${_r(edge)}${z != null ? ' (${(z as num).toStringAsFixed(1)} sigma)' : ''}' : ''}',
             style: TextStyle(color: p.muted, fontSize: 11.5),
           ),
@@ -252,6 +340,7 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.all(12),
         children: [
+          _hypPanel(p),
           Panel(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text('REPLAY THE STRATEGY ON HISTORY', style: TextStyle(color: p.muted, fontSize: 11, letterSpacing: 1, fontWeight: FontWeight.w600)),
