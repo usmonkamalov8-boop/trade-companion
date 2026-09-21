@@ -220,7 +220,8 @@ async def diagnostics():
     st = bot.load()
     return {"time": int(time.time()), "service": bot.service_state(), "halted": st["halted"],
             "events": {"last_id": events.last_id()}, "push": push.info(), "calendar": econ.diag(), "timezone": tz.info(),
-            "journal": journal.counts()}
+            "journal": journal.counts(), "rate_limit": {"until": getattr(market, "_ban", {}).get("until", 0),
+                                                         "why": getattr(market, "_ban", {}).get("why", "")}}
 
 
 # --------------------------------------------------------- economic calendar
@@ -309,6 +310,7 @@ async def chart(name: str, tf: str = "1h", n: int = Query(100, ge=20, le=200), s
 
 class BacktestIn(BaseModel):
     days: int = 90
+    offset_days: int = 0
     style: str = "intraday"
     assets: list[str] | None = None
     fee_bp: float = 5.0
@@ -319,7 +321,7 @@ class BacktestIn(BaseModel):
 @api.post("/backtest/start")
 async def backtest_start(b: BacktestIn):
     try:
-        return backtest.start(b.days, b.style, [a.upper() for a in b.assets] if b.assets else None, b.fee_bp, b.slip_bp, b.min_conf)
+        return backtest.start(b.days, b.style, [a.upper() for a in b.assets] if b.assets else None, b.fee_bp, b.slip_bp, b.min_conf, b.offset_days)
     except RuntimeError as ex:
         raise HTTPException(409, str(ex))
     except ValueError as ex:
@@ -327,8 +329,12 @@ async def backtest_start(b: BacktestIn):
 
 
 @api.get("/backtest/status")
-async def backtest_status():
-    return backtest.latest() or {"status": "none"}
+async def backtest_status(detail: int = 1):
+    """detail=0 returns only progress (cheap, for polling); detail=1 the full result of the latest run."""
+    job = backtest.latest()
+    if not job:
+        return {"status": "none"}
+    return job if detail else backtest.slim(job)
 
 
 @api.post("/backtest/cancel")
@@ -347,6 +353,14 @@ async def journal_list(limit: int = Query(40, ge=1, le=200), state: str | None =
     """Logged setups and how they turned out."""
     return {"items": journal.recent(limit, state if state in ("open", "closed") else None,
                                     style if style in strategy.STYLES else None, name.upper() if name else None)}
+
+
+@api.get("/journal/reconcile")
+async def journal_reconcile():
+    """Compare the live journal with the latest finished backtest for the same period."""
+    rc = journal.reconcile()
+    rc["text"] = journal.reconcile_text(rc)
+    return rc
 
 
 @api.get("/journal/stats")

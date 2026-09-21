@@ -156,15 +156,40 @@ async def news(cat):
 
 # ------------------------------------------------- any timeframe (strategy analysis)
 
+_ban = {"until": 0.0, "why": ""}
+
+
+def _check_ban():
+    """While an exchange has told us to slow down, do not send more requests (a ban on the shared IP would also hit the bot)."""
+    left = _ban["until"] - time.time()
+    if left > 0:
+        raise RuntimeError(f"rate limited ({_ban['why']}), retry in {int(left)} s")
+
+
+def _note(r, src):
+    if r.status_code in (418, 429):
+        try:
+            ra = int(r.headers.get("retry-after", "60") or 60)
+        except ValueError:
+            ra = 60
+        _ban.update(until=time.time() + min(max(ra, 30), 3600), why=f"{src} HTTP {r.status_code}")
+    used = r.headers.get("x-mbx-used-weight-1m")
+    if used and used.isdigit() and int(used) > 1800:       # Binance allows 2400 per minute per IP
+        _ban.update(until=max(_ban["until"], time.time() + 20), why="Binance request weight is high")
+
+
 _TTL = {"5m": 45, "15m": 90, "1h": 240, "4h": 600, "1d": 1800, "1w": 3600, "1M": 7200}
 _YF = {"5m": ("5m", "5d"), "15m": ("15m", "1mo"), "1h": ("60m", "1mo"), "1d": ("1d", "1y"), "1w": ("1wk", "5y"), "1M": ("1mo", "10y")}
 
 
 async def _yahoo_ttl(sym, interval, rng, ttl):
     async def go():
+        _check_ban()
         async with _sem, httpx.AsyncClient(timeout=15) as cl:
             r = await cl.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
                              params={"interval": interval, "range": rng}, headers=UA)
+        if r.status_code == 429:
+            _ban.update(until=time.time() + 120, why="Yahoo HTTP 429")
         r.raise_for_status()
         res = r.json()["chart"]["result"][0]
         q = res["indicators"]["quote"][0]
@@ -186,9 +211,11 @@ async def _yahoo_ttl(sym, interval, rng, ttl):
 async def klines_tf(name, kind, tf):
     if kind == "crypto":
         async def go():
+            _check_ban()
             async with _sem, httpx.AsyncClient(timeout=15) as cl:
                 r = await cl.get("https://fapi.binance.com/fapi/v1/klines",
                                  params={"symbol": name + "USDT", "interval": tf, "limit": 300})
+            _note(r, "Binance")
             r.raise_for_status()
             rows = r.json()
             return {"t": [x[0] for x in rows], "o": [float(x[1]) for x in rows], "h": [float(x[2]) for x in rows],

@@ -5,7 +5,7 @@ Settings > Time zone is either "auto" (the phone reports its UTC offset whenever
 IANA name such as Asia/Dubai. Market rules stay in New York time (forex closes Friday 17:00 and reopens
 Sunday 17:00 there, ICT kill zones are New York hours); this module converts them for display."""
 import os, time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from . import prefs
 
 try:
@@ -27,8 +27,41 @@ def valid(name):
     return name == "auto" or _named(name) is not None
 
 
+class _NyRules(tzinfo):
+    """America/New_York without a tz database: US daylight saving rules (second Sunday of March 02:00 to the first
+    Sunday of November 02:00). Only used when tzdata is missing, so the forex weekend guard stays correct."""
+
+    def _range(self, year):
+        m = datetime(year, 3, 8)
+        n = datetime(year, 11, 1)
+        start = (m + timedelta(days=(6 - m.weekday()) % 7)).replace(hour=2)
+        end = (n + timedelta(days=(6 - n.weekday()) % 7)).replace(hour=2)
+        return start, end                       # local wall-clock times
+
+    def utcoffset(self, dt):
+        start, end = self._range(dt.year)
+        naive = dt.replace(tzinfo=None)
+        if end - timedelta(hours=1) <= naive < end:          # the repeated hour in November: fold=1 is the second pass
+            return timedelta(hours=-5) if dt.fold else timedelta(hours=-4)
+        return timedelta(hours=-4) if start <= naive < end else timedelta(hours=-5)
+
+    def dst(self, dt):
+        return timedelta(hours=1) if self.utcoffset(dt) == timedelta(hours=-4) else timedelta(0)
+
+    def tzname(self, dt):
+        return "EDT" if self.dst(dt) else "EST"
+
+    def fromutc(self, dt):
+        start, end = self._range(dt.year)
+        naive = dt.replace(tzinfo=None)
+        edt = (start + timedelta(hours=5)) <= naive < (end + timedelta(hours=4))      # the transitions, in UTC
+        res = naive + timedelta(hours=-4 if edt else -5)
+        fold = 1 if (not edt and end - timedelta(hours=1) <= res < end) else 0
+        return res.replace(tzinfo=self, fold=fold)
+
+
 def ny_zone():
-    return _named("America/New_York") or timezone(timedelta(hours=-5))
+    return _named("America/New_York") or _NyRules()
 
 
 def zone():
@@ -121,9 +154,13 @@ def market_hours(ts=None):
     return f"opens {lo:%a %H:%M}, closes {lc:%a %H:%M} ({label(lo)})"
 
 
+def tzdata_ok():
+    return _named("America/New_York") is not None
+
+
 def info():
     ny, z = ny_zone(), zone()
     now = datetime.now(z)
-    return {"zone": zone_title(), "label": label(now), "offset_min": offset_now(), "now": now.strftime("%H:%M"),
+    return {"tzdata_ok": tzdata_ok(), "zone": zone_title(), "label": label(now), "offset_min": offset_now(), "now": now.strftime("%H:%M"),
             "date": now.strftime("%a %d %b %Y"), "ny_now": datetime.now(ny).strftime("%H:%M"),
             "sessions": sessions(), "forex_hours": market_hours()}

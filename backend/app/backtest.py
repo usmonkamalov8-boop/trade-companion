@@ -6,11 +6,16 @@ then follows price candle by candle with the same rules as the live setup journa
 - A setup fills when price trades through its entry price. If TP1 is reached first it is "missed".
 - On the fill candle only the stop counts. If stop and TP1 sit in one candle the stop wins.
 - Win = TP1 before the stop (R = planned reward to TP1). Loss = -1R. Fees and slippage are subtracted.
+- Two ways to enter are replayed side by side: "limit" (a resting order at the zone midpoint) and "confirm" (wait until
+  price is in the zone AND a 5-minute CHoCH/BOS in the trade direction appears, then enter at that close).
+- Every setup is compared with a coin-flip baseline: same stop and target distances, entered at market at the same time,
+  averaged over long and short. A strategy only has an edge if it beats that baseline.
+- Results carry 95% ranges and a verdict, so a small sample cannot pass for proof.
 - Not modelled: news filtering, funding, partial exits, order-book depth. Forex is not supported (no real volume).
 
 The replay runs in its own low-priority process (python -m app.backtest run --job ID), so the API and the bot stay
 responsive on a small VPS. Progress and results are written to backtests/<id>.json."""
-import bisect, gzip, json, os, signal, subprocess, sys, time, uuid
+import bisect, gzip, json, math, os, signal, subprocess, sys, time, uuid
 from pathlib import Path
 from . import config as C, journal, strategy
 
@@ -26,16 +31,28 @@ POI_CORE = ("OB", "FVG")
 # ------------------------------------------------------------------ data
 
 
+class Banned(RuntimeError):
+    pass
+
+
 def _get(params, tries=4):
+    """Binance klines with backoff. A ban (418) stops everything: the trading bot shares this IP."""
     import httpx
     for i in range(tries):
         try:
             r = httpx.get(BINANCE, params=params, timeout=30)
-            if r.status_code in (418, 429):
-                time.sleep(5 * (i + 1))
+            if r.status_code == 418:
+                raise Banned(f"Binance banned this IP (HTTP 418), retry after {r.headers.get('retry-after', '?')} s")
+            if r.status_code == 429:
+                time.sleep(min(int(r.headers.get("retry-after", "30") or 30), 120))
                 continue
+            used = r.headers.get("x-mbx-used-weight-1m")
+            if used and used.isdigit() and int(used) > 1500:
+                time.sleep(15)                          # leave room for the trading bot
             r.raise_for_status()
             return r.json()
+        except Banned:
+            raise
         except Exception:
             if i == tries - 1:
                 raise
@@ -52,7 +69,7 @@ def _page(sym, a_ms, b_ms):
         a_ms = data[-1][0] + 300000
         if len(data) < 1500:
             break
-        time.sleep(0.15)
+        time.sleep(0.35)                                 # about 170 weight per minute: well below the 2400 limit
     return rows
 
 
@@ -89,8 +106,8 @@ def fetch_htf(sym, interval):
     return [[x[0], float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5]), x[6]] for x in data]
 
 
-def load_data(name, days, now=None):
-    now = int((now or time.time()) // 300 * 300)
+def load_data(name, days, now=None, offset_days=0):
+    now = int((now or time.time()) // 300 * 300) - int(offset_days) * 86400
     sym = name + "USDT"
     rows = fetch_5m(sym, (now - (days + WARMUP_DAYS) * 86400) * 1000, now * 1000)
     return rows, fetch_htf(sym, "1w"), fetch_htf(sym, "1M")
@@ -134,9 +151,83 @@ def _htf(rows):
 
 # ------------------------------------------------------------------ replay
 
+WAIT_BARS = {"scalp": 24, "intraday": 48, "swing": 96}           # 5-minute bars to wait for confirmation after a touch
+
+
+def _row(T, direction, entry, stop, tp1, style, state="pending", act=None):
+    return {"ts": T, "dir": direction, "entry": entry, "stop": stop, "tp1": tp1, "style": style, "state": state,
+            "result": None, "activated_ts": act, "closed_ts": None, "r_result": None, "mfe_r": None, "mae_r": None,
+            "checked_ts": None, "expires_ts": T + journal.LIFE[style]}
+
+
+def _net(row, cost_pct, entry, stop):
+    risk_pct = abs(entry - stop) / entry * 100
+    cost_r = cost_pct / risk_pct if risk_pct > 0 else 0.0
+    return row["r_result"] - cost_r, cost_r
+
+
+def _baseline(base, i0, style, sd, td, px0, cost_pct, end_ts, T):
+    """Coin-flip benchmark: enter at market at the open of candle i0 with the same stop distance sd and target
+    distance td, once long and once short, and average. Returns (net R, win share) or None if not resolvable."""
+    horizon = T + journal.MAX_OPEN[style]
+    i1 = bisect.bisect_right(base["t"], horizon)
+    fut = {k: base[k][i0:i1] for k in ("t", "h", "l", "c")}
+    now = min(horizon, end_ts)
+    rs, wins = [], 0.0
+    for d in (1, -1):
+        row = _row(T, "long" if d == 1 else "short", px0, px0 - d * sd, px0 + d * td, style, "active", T - 1)
+        row.update(journal.advance(row, fut, 300, now))
+        if row["state"] != "closed" and now < horizon:
+            return None
+        if row["r_result"] is None:
+            return None
+        net, _ = _net(row, cost_pct, px0, row["stop"])
+        rs.append(net)
+        wins += 1.0 if row["result"] == "win" else 0.0
+    return sum(rs) / 2, wins / 2
+
+
+def _confirm_entry(base, i0, T, s, style, end_ts):
+    """After the price touches the zone, wait for a 5-minute CHoCH/BOS in the trade direction and enter at its close.
+    Returns (row dict ready for advance, candle index) or None when there was no confirmed entry."""
+    d = 1 if s["direction"] == "long" else -1
+    zl, zh, stop, tp1 = s["zone"]["low"], s["zone"]["high"], s["stop"], s["tp1"]["price"]
+    life_bars = journal.LIFE[style] // 300
+    n = len(base["t"])
+    j = None
+    for i in range(i0, min(n, i0 + life_bars)):
+        if (d == 1 and base["l"][i] <= stop) or (d == -1 and base["h"][i] >= stop):
+            return None                                   # the stop level was hit before any zone touch
+        if (d == 1 and base["h"][i] >= tp1 and base["l"][i] > zh) or (d == -1 and base["l"][i] <= tp1 and base["h"][i] < zl):
+            return None                                   # the target ran away without touching the zone
+        if base["l"][i] <= zh and base["h"][i] >= zl:
+            j = i
+            break
+    if j is None:
+        return None
+    a, e = max(0, j - 80), min(n, j + WAIT_BARS[style] + 1)
+    sub = {k: base[k][a:e] for k in ("o", "h", "l", "c")}
+    st = strategy.structure(sub, 3)
+    conf = next((a + ev["idx"] for ev in st["events"] if ev["dir"] == d and a + ev["idx"] >= j), None)
+    if conf is None or conf >= n - 1 or base["t"][conf] + 300 > end_ts:
+        return None
+    for i in range(j, conf + 1):                           # stopped out while waiting for the confirmation
+        if (d == 1 and base["l"][i] <= stop) or (d == -1 and base["h"][i] >= stop):
+            return None
+    entry = base["c"][conf]
+    if d * (entry - stop) <= 0 or d * (tp1 - entry) <= 0:
+        return None
+    risk, reward = abs(entry - stop), abs(tp1 - entry)
+    if reward / risk < 1.0:
+        return None                                        # the confirmation came too late for a sensible target
+    T2 = base["t"][conf] + 300
+    row = _row(T2, s["direction"], entry, stop, tp1, style, "active", T2 - 1)
+    row["expires_ts"] = T2 + journal.MAX_OPEN[style]
+    return row, conf + 1
+
 
 def replay(name, rows, wk, mo, days, style, fee_bp, slip_bp, min_conf, end_ts, cancelled=lambda: False, tick=lambda i, n: None):
-    """Replay one asset. Returns (trades, logged, unresolved)."""
+    """Replay one asset. Returns (limit_trades, confirm_trades, logged, unresolved)."""
     base = _cols(rows)
     base["end"] = [t + 300 for t in base["t"]]
     frames = {"5m": base}
@@ -153,7 +244,7 @@ def replay(name, rows, wk, mo, days, style, fee_bp, slip_bp, min_conf, end_ts, c
     steps = max(1, (last - first) // step + 1)
     life, hold = journal.LIFE[style], journal.MAX_OPEN[style]
     cost_pct = 2 * (fee_bp + slip_bp) / 100.0
-    seen, trades, logged, unresolved = {}, [], 0, 0
+    seen, limit_t, conf_t, logged, unresolved = {}, [], [], 0, 0
     t5 = base["t"]
     T, k = first, 0
     while T <= last:
@@ -173,37 +264,77 @@ def replay(name, rows, wk, mo, days, style, fee_bp, slip_bp, min_conf, end_ts, c
             if seen.get(sig, 0) < T - 86400:
                 seen[sig] = T
                 logged += 1
-                row = {"ts": T, "dir": s["direction"], "entry": s["entry"], "stop": s["stop"], "tp1": s["tp1"]["price"],
-                       "style": style, "state": "pending", "result": None, "activated_ts": None, "closed_ts": None,
-                       "r_result": None, "mfe_r": None, "mae_r": None, "checked_ts": None, "expires_ts": T + life}
+                i0 = bisect.bisect_left(t5, T)
+                common = {"name": name, "style": style, "ts": T, "dir": s["direction"], "conf": s["confidence"],
+                          "conf_raw": s.get("conf_raw", s["confidence"]), "poi": s["poi"]["type"], "poi_tf": s["poi"]["tf"],
+                          "confluence": list(s["poi"]["confluence"]), "dist_atr": round(s["poi"].get("dist_atr") or 0, 2),
+                          "stop_atr": round(s["risk"]["stop_atr"], 2), "rr1": round(s["risk"]["rr1"], 2),
+                          "factors": {f["key"]: f["pts"] for f in s["factors"]}, "status0": s["status"], "signal": True}
+                # --- blind limit order at the zone midpoint
+                row = _row(T, s["direction"], s["entry"], s["stop"], s["tp1"]["price"], style)
                 horizon = T + life + hold
-                i0, i1 = bisect.bisect_left(t5, T), bisect.bisect_right(t5, horizon)
+                i1 = bisect.bisect_right(t5, horizon)
                 fut = {key: base[key][i0:i1] for key in ("t", "h", "l", "c")}
                 now = min(horizon, end_ts)
                 row.update(journal.advance(row, fut, 300, now))
+                sd = abs(s["entry"] - s["stop"])
+                td = abs(s["tp1"]["price"] - s["entry"])
+                bl = _baseline(base, i0, style, sd, td, base["o"][i0], cost_pct, end_ts, T) if i0 < len(t5) else None
                 if row["state"] != "closed" and now < horizon:
                     unresolved += 1
-                elif row["result"] in ("win", "loss", "timeout"):
-                    risk_pct = abs(row["entry"] - row["stop"]) / row["entry"] * 100
-                    cost_r = cost_pct / risk_pct if risk_pct > 0 else 0.0
-                    trades.append({"name": name, "style": style, "ts": T, "dir": row["dir"], "conf": s["confidence"],
-                                   "conf_raw": s.get("conf_raw", s["confidence"]), "poi": s["poi"]["type"],
-                                   "poi_tf": s["poi"]["tf"], "confluence": list(s["poi"]["confluence"]),
-                                   "result": row["result"], "r": round(row["r_result"], 3),
-                                   "net_r": round(row["r_result"] - cost_r, 3), "rr1": round(s["risk"]["rr1"], 2),
-                                   "stop_pct": round(risk_pct, 3), "closed_ts": row["closed_ts"]})
                 else:
-                    trades.append({"name": name, "style": style, "ts": T, "result": row["result"], "unfilled": True,
-                                   "poi": s["poi"]["type"], "conf_raw": s.get("conf_raw", s["confidence"]),
-                                   "confluence": list(s["poi"]["confluence"]), "dir": row["dir"]})
+                    rec = dict(common, b_r=None if bl is None else round(bl[0], 3), b_win=None if bl is None else bl[1])
+                    if row["result"] in ("win", "loss", "timeout"):
+                        net, _ = _net(row, cost_pct, row["entry"], row["stop"])
+                        rec.update(result=row["result"], r=round(row["r_result"], 3), net_r=round(net, 3),
+                                   stop_pct=round(abs(row["entry"] - row["stop"]) / row["entry"] * 100, 3), closed_ts=row["closed_ts"])
+                    else:
+                        rec.update(result=row["result"], unfilled=True)
+                    limit_t.append(rec)
+                # --- wait for a 5-minute CHoCH / BOS inside the zone, then enter at market
+                ce = _confirm_entry(base, i0, T, s, style, end_ts)
+                if ce:
+                    row2, i2 = ce
+                    horizon2 = row2["expires_ts"]
+                    j1 = bisect.bisect_right(t5, horizon2)
+                    fut2 = {key: base[key][i2:j1] for key in ("t", "h", "l", "c")}
+                    now2 = min(horizon2, end_ts)
+                    row2.update(journal.advance(row2, fut2, 300, now2))
+                    if row2["state"] == "closed" and row2["result"] in ("win", "loss", "timeout"):
+                        net, _ = _net(row2, cost_pct, row2["entry"], row2["stop"])
+                        sd2, td2 = abs(row2["entry"] - row2["stop"]), abs(row2["tp1"] - row2["entry"])
+                        bl2 = _baseline(base, i2, style, sd2, td2, base["o"][i2], cost_pct, end_ts, row2["ts"])
+                        conf_t.append(dict(common, ts=row2["ts"], b_r=None if bl2 is None else round(bl2[0], 3),
+                                           b_win=None if bl2 is None else bl2[1], result=row2["result"], r=round(row2["r_result"], 3),
+                                           net_r=round(net, 3), stop_pct=round(sd2 / row2["entry"] * 100, 3), closed_ts=row2["closed_ts"]))
         k += 1
         if k % 25 == 0:
             tick(k, steps)
         T += step
-    return trades, logged, unresolved
+    return limit_t, conf_t, logged, unresolved
 
 
 # ------------------------------------------------------------------ statistics
+
+
+def wilson(k, n, z=1.96):
+    if n == 0:
+        return None
+    p = k / n
+    d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return [round((c - h) * 100, 1), round((c + h) * 100, 1)]
+
+
+def _mean_sd(xs):
+    n = len(xs)
+    if n == 0:
+        return None, None
+    m = sum(xs) / n
+    if n < 2:
+        return m, None
+    return m, math.sqrt(sum((x - m) ** 2 for x in xs) / (n - 1))
 
 
 def summarize(trades):
@@ -219,14 +350,35 @@ def summarize(trades):
         eq += t["net_r"]
         peak = max(peak, eq)
         dd = max(dd, peak - eq)
+    m, sd = _mean_sd(net)
+    ci = [round(m - 1.96 * sd / math.sqrt(len(net)), 3), round(m + 1.96 * sd / math.sqrt(len(net)), 3)] if sd is not None else None
+    if len(filled) < 30 or ci is None:
+        verdict = "too few trades"
+    elif ci[0] > 0:
+        verdict = "positive (significant)"
+    elif ci[1] < 0:
+        verdict = "negative (significant)"
+    else:
+        verdict = "inconclusive"
+    # coin-flip baseline over every setup in the group (filled or not): what a random entry with the same risk would do
+    bl = [t for t in trades if t.get("b_r") is not None]
+    bm, bsd = _mean_sd([t["b_r"] for t in bl])
+    baseline = None
+    edge = edge_z = None
+    if bl:
+        baseline = {"n": len(bl), "avg_net_r": bm, "win_rate": sum(t["b_win"] for t in bl) / len(bl) * 100}
+        if m is not None and sd is not None and bsd is not None and len(net) > 1 and len(bl) > 1:
+            edge = m - bm
+            se = math.sqrt(sd ** 2 / len(net) + bsd ** 2 / len(bl))
+            edge_z = edge / se if se > 0 else None
     return {"logged": len(trades), "filled": len(filled), "unfilled": len(unf), "wins": len(w), "losses": len(l),
             "timeouts": len(filled) - len(w) - len(l),
-            "win_rate": (len(w) / (len(w) + len(l)) * 100) if w or l else None,
+            "win_rate": (len(w) / (len(w) + len(l)) * 100) if w or l else None, "win_ci": wilson(len(w), len(w) + len(l)),
             "avg_r": (sum(gross) / len(gross)) if gross else None,
-            "avg_net_r": (sum(net) / len(net)) if net else None,
+            "avg_net_r": m, "avg_net_ci": ci, "verdict": verdict,
             "total_net_r": round(sum(net), 2), "profit_factor": (pos / neg) if neg > 0 else (None if not pos else 999.0),
-            "max_dd_r": round(dd, 2),
-            "fill_rate": (len(filled) / len(trades) * 100) if trades else None}
+            "max_dd_r": round(dd, 2), "fill_rate": (len(filled) / len(trades) * 100) if trades else None,
+            "baseline": baseline, "edge": edge, "edge_z": edge_z}
 
 
 def is_core_full(t):
@@ -235,7 +387,19 @@ def is_core_full(t):
     return zone_ok and any(x.startswith(("POC", "VAL", "VAH")) for x in c)
 
 
-def group(trades):
+def _equity(trades, points=60):
+    filled = sorted((t for t in trades if not t.get("unfilled")), key=lambda t: t["closed_ts"])
+    eq, series = 0.0, []
+    for t in filled:
+        eq += t["net_r"]
+        series.append(round(eq, 2))
+    if len(series) > points:
+        step = len(series) / points
+        series = [series[min(len(series) - 1, int(i * step))] for i in range(points)] + [series[-1]]
+    return series
+
+
+def group(trades, extras=False):
     out = {"all": summarize(trades),
            "ob_fvg": summarize([t for t in trades if t["poi"] in POI_CORE]),
            "ob_fvg_volume": summarize([t for t in trades if is_core_full(t)])}
@@ -246,6 +410,25 @@ def group(trades):
         types.setdefault(t["poi"], []).append(t)
     out["by_poi"] = sorted(({"label": k, **summarize(v)} for k, v in types.items()), key=lambda x: -x["logged"])[:6]
     out["by_dir"] = [{"label": d, **summarize([t for t in trades if t["dir"] == d])} for d in ("long", "short")]
+    if extras:
+        out["by_dist"] = [{"label": lab, **summarize([t for t in trades if lo <= (t.get("dist_atr") or 0) < hi])}
+                          for lab, lo, hi in (("Inside / under 1 ATR", 0, 1), ("1-3 ATR away", 1, 3), ("3+ ATR away", 3, 999))]
+        names = ["vp", "volvalid", "trigger", "sweep", "loc", "rr", "htf", "session", "range"]
+        abl = []
+        for key in names:
+            with_ = [t for t in trades if (t.get("factors") or {}).get(key, 0) > 0]
+            without = [t for t in trades if (t.get("factors") or {}).get(key, 0) <= 0]
+            a, c = summarize(with_), summarize(without)
+            if a["filled"] >= 15 and c["filled"] >= 15:
+                abl.append({"label": key, "with": a["filled"], "without": c["filled"], "avg_with": a["avg_net_r"],
+                            "avg_without": c["avg_net_r"], "diff": a["avg_net_r"] - c["avg_net_r"]})
+        out["ablation"] = sorted(abl, key=lambda x: -x["diff"])
+        ts = sorted((t["ts"] for t in trades))
+        if len(ts) >= 30:
+            a1, a2 = ts[len(ts) // 3], ts[2 * len(ts) // 3]
+            out["by_third"] = [{"label": lab, **summarize([t for t in trades if lo <= t["ts"] < hi])}
+                               for lab, lo, hi in (("First third", 0, a1), ("Middle third", a1, a2), ("Last third", a2, 9e12))]
+        out["equity"] = _equity(trades)
     return out
 
 
@@ -298,20 +481,52 @@ def latest():
     return None
 
 
-def start(days=90, style="intraday", assets=None, fee_bp=5.0, slip_bp=2.0, min_conf=0):
+def latest_done():
+    if not DIR.is_dir():
+        return None
+    for f in sorted(DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            job = json.loads(f.read_text())
+        except Exception:
+            continue
+        if job.get("status") == "done":
+            return job
+    return None
+
+
+def load_trades(job_id, mode="limit"):
+    try:
+        with gzip.open(DIR / f"{job_id}_trades.json.gz", "rt") as f:
+            data = json.load(f)
+    except Exception:
+        return []
+    return data.get(mode, []) if isinstance(data, dict) else data
+
+
+def slim(job):
+    """Job without the bulky per-asset detail, for the app's polling while a run is in progress."""
+    if not job:
+        return job
+    keep = ("id", "status", "started", "finished", "params", "progress", "error", "end_ts")
+    return {k: job[k] for k in keep if k in job}
+
+
+def start(days=90, style="intraday", assets=None, fee_bp=5.0, slip_bp=2.0, min_conf=0, offset_days=0):
     cur = latest()
     if cur and cur.get("status") == "running":
         raise RuntimeError("a backtest is already running")
     names = [a for a in (assets or C.CRYPTO) if a in C.CRYPTO]
     if not names:
         raise ValueError("no valid crypto assets")
-    days = max(7, min(int(days), 180))
+    days = max(7, min(int(days), 365))
+    offset_days = max(0, min(int(offset_days), 730))
     if style not in strategy.STYLES:
         style = "intraday"
     job = {"id": time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4], "status": "running", "started": time.time(),
-           "params": {"days": days, "style": style, "assets": names, "fee_bp": float(fee_bp), "slip_bp": float(slip_bp),
-                      "min_conf": int(min_conf)},
-           "progress": {"done": 0, "total": len(names), "current": None, "pct": 0}, "assets": {}}
+           "params": {"days": days, "offset_days": offset_days, "style": style, "assets": names, "fee_bp": float(fee_bp),
+                      "slip_bp": float(slip_bp), "min_conf": int(min_conf),
+                      "rules": strategy.RULES_VERSION},
+           "progress": {"done": 0, "total": len(names), "current": None, "pct": 0}, "assets": {}, "assets_confirm": {}}
     _save(job)
     DIR.mkdir(parents=True, exist_ok=True)
     log = open(DIR / "worker.log", "ab")
@@ -356,10 +571,18 @@ def worker(job_id):
         os.nice(15)                       # never compete with the API or the bot
     except Exception:
         pass
+    try:
+        import resource
+        resource.setrlimit(resource.RLIMIT_DATA, (700 << 20, 700 << 20))    # a runaway replay must not starve the VPS
+    except Exception:
+        pass
     job = json.loads(_path(job_id).read_text())
+    job.setdefault("assets", {})
+    job.setdefault("assets_confirm", {})
     p = job["params"]
-    end_ts = int(time.time() // 300 * 300)
-    all_trades = []
+    end_ts = int(time.time() // 300 * 300) - p.get("offset_days", 0) * 86400
+    job["end_ts"] = end_ts
+    all_limit, all_conf = [], []
     try:
         for i, name in enumerate(p["assets"]):
             cur = json.loads(_path(job_id).read_text())
@@ -378,25 +601,34 @@ def worker(job_id):
                 except Exception:
                     return False
             try:
-                rows, wk, mo = load_data(name, p["days"], end_ts)
+                rows, wk, mo = load_data(name, p["days"], time.time(), p.get("offset_days", 0))
                 if len(rows) < 2000:
                     raise RuntimeError("not enough history")
-                trades, logged, unresolved = replay(name, rows, wk, mo, p["days"], p["style"], p["fee_bp"], p["slip_bp"],
+                lt, ct, logged, unresolved = replay(name, rows, wk, mo, p["days"], p["style"], p["fee_bp"], p["slip_bp"],
                                                     p["min_conf"], end_ts, cancelled, tick)
-                res = group(trades)
+                res = group(lt)
                 res["unresolved"] = unresolved
                 job["assets"][name] = res
-                all_trades += trades
+                job["assets_confirm"][name] = group(ct)
+                all_limit += lt
+                all_conf += ct
+                del rows
+            except Banned as e:
+                job["status"], job["error"] = "failed", str(e)
+                _wsave(job)
+                return
             except Exception as e:
                 job["assets"][name] = {"error": str(e)[:120]}
             _wsave(job)
-        job["overall"] = group(all_trades)
-        job["by_asset"] = sorted(({"name": n, **(r.get("all") or {})} for n, r in job["assets"].items() if "all" in r),
-                                 key=lambda x: -(x.get("total_net_r") or 0))
+        job["overall"] = group(all_limit, extras=True)
+        job["overall_confirm"] = group(all_conf, extras=True)
+        for key, src in (("by_asset", "assets"), ("by_asset_confirm", "assets_confirm")):
+            job[key] = sorted(({"name": n, **(r.get("all") or {})} for n, r in job[src].items() if "all" in r),
+                              key=lambda x: -(x.get("total_net_r") or 0))
         job["status"], job["finished"] = "done", time.time()
         job["progress"].update({"done": len(p["assets"]), "pct": 100, "current": None})
         with gzip.open(DIR / f"{job_id}_trades.json.gz", "wt") as f:
-            json.dump(all_trades[:20000], f)
+            json.dump({"limit": all_limit[:30000], "confirm": all_conf[:30000]}, f)
     except BaseException as e:
         job["status"], job["error"] = "failed", str(e)[:200]
     _wsave(job)

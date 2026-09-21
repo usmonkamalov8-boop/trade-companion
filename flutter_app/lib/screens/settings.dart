@@ -435,6 +435,30 @@ class _NotificationsPageState extends State<NotificationsPage> {
                 ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+                  child: Text('Only alert if the zone is within: ${(setupsCfg['max_dist_atr'] as num?) == 0 ? 'any distance' : '${setupsCfg['max_dist_atr'] ?? 3} ATR (or price is already in it)'}',
+                      style: TextStyle(color: p.muted, fontSize: 12.5)),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+                  child: Wrap(spacing: 8, children: [
+                    for (final v in [0, 1, 2, 3, 5])
+                      ChoiceChip(
+                        label: Text(v == 0 ? 'Any' : '$v ATR'),
+                        selected: ((setupsCfg['max_dist_atr'] as num?)?.toInt() ?? 3) == v,
+                        onSelected: (_) => ServerPrefs.I.update({'setups': {'max_dist_atr': v}}),
+                      ),
+                  ]),
+                ),
+                SwitchListTile(
+                  dense: true,
+                  title: const Text('Wait for the candle close before alerting'),
+                  subtitle: Text('Fewer false alerts: setups that vanish before their candle closes are dropped, but the alert comes later',
+                      style: TextStyle(color: p.muted, fontSize: 12)),
+                  value: setupsCfg['confirm_close'] == true,
+                  onChanged: (v) => ServerPrefs.I.update({'setups': {'confirm_close': v}}),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
                   child: Text('How often the server looks for setups', style: TextStyle(color: p.muted, fontSize: 12.5)),
                 ),
                 Padding(
@@ -477,6 +501,14 @@ class _NotificationsPageState extends State<NotificationsPage> {
                       style: TextStyle(color: p.muted, fontSize: 12.5)),
                   value: soundCfg['enabled'] != false,
                   onChanged: (v) => ServerPrefs.I.update({'setups': {'sound': {'enabled': v}}}),
+                ),
+                SwitchListTile(
+                  dense: true,
+                  title: const Text('Urgent only once price is in the zone'),
+                  subtitle: Text('A new setup that price has not reached yet is capped at High',
+                      style: TextStyle(color: p.muted, fontSize: 12)),
+                  value: soundCfg['urgent_needs_ready'] != false,
+                  onChanged: (v) => ServerPrefs.I.update({'setups': {'sound': {'urgent_needs_ready': v}}}),
                 ),
                 for (final row in [
                   ['urgent_from', 'Urgent (loudest) from confidence', '85', '75,80,85,90,95'],
@@ -1026,6 +1058,9 @@ class _DiagnosticsPageState extends State<DiagnosticsPage> {
     final push = x?['push'] as Map<String, dynamic>?;
     final attempts = (cal?['attempts'] as List?) ?? [];
     final jr = x?['journal'] as Map<String, dynamic>?;
+    final tzi = x?['timezone'] as Map<String, dynamic>?;
+    final rl = x?['rate_limit'] as Map<String, dynamic>?;
+    final rlLeft = ((rl?['until'] as num?) ?? 0) - DateTime.now().millisecondsSinceEpoch / 1000;
     return Scaffold(
       appBar: AppBar(title: const Text('Diagnostics'), actions: [
         IconButton(onPressed: _load, icon: const Icon(Icons.refresh)),
@@ -1073,12 +1108,23 @@ class _DiagnosticsPageState extends State<DiagnosticsPage> {
                 ),
             ]),
           ),
+          const Heading('Time zone database and rate limits'),
+          Panel(
+            child: Column(children: [
+              _kv(p, 'Time zone data', tzi?['tzdata_ok'] == false ? 'MISSING: built-in US daylight-saving rules are used (pip install tzdata)' : 'OK',
+                  color: tzi?['tzdata_ok'] == false ? p.loss : p.gain),
+              _kv(p, 'Exchange limits', rlLeft > 0 ? 'Slowing down: ${rl?['why']} (${rlLeft.round()} s)' : 'No limit active',
+                  color: rlLeft > 0 ? p.warn : p.gain),
+            ]),
+          ),
           const Heading('Setup journal'),
           Panel(
             child: Column(children: [
               _kv(p, 'Logged setups', '${jr?['total']}'),
               _kv(p, 'Open now', '${jr?['open']}'),
               _kv(p, 'Last scan', _ago((jr?['last_scan'] as num?) ?? 0)),
+              if (jr?['repaint_rate'] != null)
+                _kv(p, 'Repainting', '${(jr!['repaint_rate'] as num).toStringAsFixed(0)}% of ${jr['repaint_tracked']} setups vanished before the candle closed'),
               if (jr?['error'] != null) _kv(p, 'Problem', '${jr?['error']}', color: p.loss),
             ]),
           ),

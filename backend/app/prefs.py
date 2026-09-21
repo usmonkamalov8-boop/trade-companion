@@ -42,9 +42,10 @@ def defaults():
                      "currencies": [c for c in cur if c in CURRENCIES] or ["USD", "EUR", "GBP", "JPY"],
                      "leads": sorted({x for x in leads if x in LEADS} or {60, 15, 0}, reverse=True)},
         "general": {"timezone": _env_tz(), "tz_offset_min": None},
-        "setups": {"enabled": True, "min_conf": 50, "styles": list(STYLES), "markets": list(MARKETS),
-                   "on_zone": True, "scan_seconds": 60,
-                   "sound": {"enabled": True, "urgent_from": 85, "high_from": 70, "quiet_below": 50}},
+        "setups": {"enabled": True, "min_conf": 70, "styles": list(STYLES), "markets": list(MARKETS),
+                   "on_zone": True, "scan_seconds": 60, "max_dist_atr": 3, "confirm_close": False,
+                   "sound": {"enabled": True, "urgent_from": 85, "high_from": 70, "quiet_below": 50,
+                             "urgent_needs_ready": True}},
         "analyst": {"style": "intraday", "modules": {m: True for m in MODULES}, "news_scoring": True, "journal": True},
     }
 
@@ -125,9 +126,11 @@ def _clean(p):
     st = p.get("setups") or {}
     if isinstance(st, dict):
         o = {}
-        for k in ("enabled", "on_zone"):
+        for k in ("enabled", "on_zone", "confirm_close"):
             if isinstance(st.get(k), bool):
                 o[k] = st[k]
+        if isinstance(st.get("max_dist_atr"), (int, float)) and not isinstance(st.get("max_dist_atr"), bool):
+            o["max_dist_atr"] = max(0, min(20, int(st["max_dist_atr"])))
         if isinstance(st.get("min_conf"), (int, float)) and not isinstance(st.get("min_conf"), bool):
             o["min_conf"] = max(0, min(100, int(st["min_conf"])))
         if isinstance(st.get("styles"), list):
@@ -143,8 +146,9 @@ def _clean(p):
         sd = st.get("sound")
         if isinstance(sd, dict):
             so = {}
-            if isinstance(sd.get("enabled"), bool):
-                so["enabled"] = sd["enabled"]
+            for k in ("enabled", "urgent_needs_ready"):
+                if isinstance(sd.get(k), bool):
+                    so[k] = sd[k]
             for k in ("urgent_from", "high_from", "quiet_below"):
                 if isinstance(sd.get(k), (int, float)) and not isinstance(sd.get(k), bool):
                     so[k] = max(0, min(100, int(sd[k])))

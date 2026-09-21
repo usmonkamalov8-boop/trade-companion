@@ -15,6 +15,7 @@ DB = C.BASE / "journal.db"
 LIFE = {"scalp": 8 * 3600, "intraday": 36 * 3600, "swing": 10 * 86400}          # unfilled setups expire
 MAX_OPEN = {"scalp": 24 * 3600, "intraday": 4 * 86400, "swing": 30 * 86400}     # filled setups time out
 TF_SEC = {"5m": 300, "1h": 3600, "4h": 14400, "1d": 86400}
+SETUP_TF_SEC = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400, "1w": 604800}
 SCAN_EVERY = 300
 _st = {"last_scan": 0.0, "last_new": 0, "error": None}
 
@@ -31,18 +32,43 @@ CREATE INDEX IF NOT EXISTS ix_sig ON setups(sig, ts);
 """
 
 
+class _Conn:
+    """sqlite3 connection as a context manager that commits (or rolls back) and always closes."""
+
+    def __enter__(self):
+        self.con = sqlite3.connect(DB, timeout=15)
+        self.con.row_factory = sqlite3.Row
+        return self.con
+
+    def __exit__(self, et, ev, tb):
+        try:
+            if et is None:
+                self.con.commit()
+            else:
+                self.con.rollback()
+        finally:
+            self.con.close()
+
+
 def _db():
-    con = sqlite3.connect(DB, timeout=10)
-    con.row_factory = sqlite3.Row
-    return con
+    return _Conn()
+
+
+NEW_COLS = (("alert_state", "TEXT"), ("close_ts", "REAL"), ("confirmed", "INTEGER"), ("alert_pending", "INTEGER"),
+            ("last_seen", "REAL"), ("dist_atr", "REAL"))
 
 
 def init():
     with _db() as con:
         con.executescript(SCHEMA)
         cols = {r[1] for r in con.execute("PRAGMA table_info(setups)")}
-        if "alert_state" not in cols:          # added with instant setup alerts
-            con.execute("ALTER TABLE setups ADD COLUMN alert_state TEXT")
+        for name, typ in NEW_COLS:          # columns added in later versions
+            if name not in cols:
+                con.execute(f"ALTER TABLE setups ADD COLUMN {name} {typ}")
+        try:
+            con.execute("PRAGMA journal_mode=WAL")      # readers never block the writer
+        except sqlite3.DatabaseError:
+            pass
 
 
 init()
@@ -51,8 +77,10 @@ init()
 # ------------------------------------------------------------------ recording
 
 
-def record(res, now=None):
-    """Log a setup from a strategy.build() result. Returns the new id, or None (nothing to log or duplicate)."""
+def record(res, now=None, alert_pending=0):
+    """Log a setup from a strategy.build() result. Returns the new id, or None (nothing to log or duplicate).
+    A logged setup is followed until it fills, is missed, or expires, even if the analysis later stops showing it
+    (a resting limit order would still be there). Whether it survived the close of its candle is tracked separately."""
     now = now or time.time()
     if res.get("error"):
         return None
@@ -66,18 +94,19 @@ def record(res, now=None):
     with _db() as con:
         if con.execute("SELECT 1 FROM setups WHERE sig=? AND ts>?", (sig, now - 86400)).fetchone():
             return None
-        con.execute("UPDATE setups SET state='closed', result='superseded', closed_ts=? "
-                    "WHERE name=? AND style=? AND state='pending'", (now, res["name"], res["style"]))
         nfx = s.get("news") or {}
-        cur = con.execute(
-            "INSERT INTO setups (ts,name,kind,style,dir,status0,conf,conf_raw,news_pts,poi_type,poi_tf,confluence,"
-            "zone_lo,zone_hi,entry,stop,tp1,tp2,rr1,rr2,price0,factors,sig,state,expires_ts,alert_state) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (now, res["name"], res["kind"], res["style"], s["direction"], s["status"], s["confidence"], s["conf_raw"],
-             nfx.get("pts", 0), s["poi"]["type"], s["poi"]["tf"], ",".join(s["poi"]["confluence"]),
-             z["low"], z["high"], s["entry"], s["stop"], s["tp1"]["price"], s["tp2"]["price"],
-             s["risk"]["rr1"], s["risk"]["rr2"], res["price"], json.dumps(s["factors"]), sig, "pending",
-             now + LIFE[res["style"]], s["status"] if s["status"] in ("IN ZONE", "READY") else ""))
+        tfs = SETUP_TF_SEC.get(strategy.STYLES[res["style"]]["setup"], 3600)
+        row = {"ts": now, "name": res["name"], "kind": res["kind"], "style": res["style"], "dir": s["direction"],
+               "status0": s["status"], "conf": s["confidence"], "conf_raw": s["conf_raw"], "news_pts": nfx.get("pts", 0),
+               "poi_type": s["poi"]["type"], "poi_tf": s["poi"]["tf"], "confluence": ",".join(s["poi"]["confluence"]),
+               "zone_lo": z["low"], "zone_hi": z["high"], "entry": s["entry"], "stop": s["stop"], "tp1": s["tp1"]["price"],
+               "tp2": s["tp2"]["price"], "rr1": s["risk"]["rr1"], "rr2": s["risk"]["rr2"], "price0": res["price"],
+               "factors": json.dumps(s["factors"]), "sig": sig, "state": "pending", "expires_ts": now + LIFE[res["style"]],
+               "alert_state": s["status"] if s["status"] in ("IN ZONE", "READY") else "",
+               "close_ts": (int(now // tfs) + 1) * tfs, "alert_pending": int(alert_pending),
+               "dist_atr": s["poi"].get("dist_atr")}
+        cols = ",".join(row)
+        cur = con.execute(f"INSERT INTO setups ({cols}) VALUES ({','.join('?' * len(row))})", tuple(row.values()))
         return cur.lastrowid
 
 
@@ -207,6 +236,11 @@ def stats(days=90, style=None, name=None):
     buckets = (("Low (under 50)", 0, 50), ("Medium (50-69)", 50, 70), ("High (70+)", 70, 101))
     out["by_conf"] = [{"label": lab, **_summ([r for r in rows if lo <= (r["conf_raw"] or 0) < hi])} for lab, lo, hi in buckets]
     out["by_style"] = [{"label": st, **_summ([r for r in rows if r["style"] == st])} for st in strategy.STYLES]
+    known = [r for r in rows if r.get("confirmed") is not None]
+    out["repaint"] = {"tracked": len(known), "repainted": sum(1 for r in known if r["confirmed"] == 0),
+                      "rate": (sum(1 for r in known if r["confirmed"] == 0) / len(known) * 100) if known else None,
+                      "confirmed": _summ([r for r in known if r["confirmed"] == 1]),
+                      "vanished": _summ([r for r in known if r["confirmed"] == 0])}
     types = {}
     for r in rows:
         types.setdefault(r["poi_type"], []).append(r)
@@ -267,7 +301,10 @@ def counts():
     with _db() as con:
         o = con.execute("SELECT COUNT(*) FROM setups WHERE state IN ('pending','active')").fetchone()[0]
         t = con.execute("SELECT COUNT(*) FROM setups").fetchone()[0]
-    return {"open": o, "total": t, "last_scan": _st["last_scan"], "last_new": _st["last_new"], "error": _st["error"]}
+        k = con.execute("SELECT COUNT(*), COALESCE(SUM(CASE WHEN confirmed=0 THEN 1 ELSE 0 END), 0) FROM setups "
+                        "WHERE confirmed IS NOT NULL").fetchone()
+    return {"open": o, "total": t, "last_scan": _st["last_scan"], "last_new": _st["last_new"], "error": _st["error"],
+            "repaint_rate": (k[1] / k[0] * 100) if k[0] else None, "repaint_tracked": k[0]}
 
 
 # ------------------------------------------------------------------ instant setup alerts
@@ -289,6 +326,9 @@ def _wanted(res, update=False):
         return False
     if update and not cfg["on_zone"]:
         return False
+    md = cfg.get("max_dist_atr", 3)
+    if not update and md and s["status"] not in ("IN ZONE", "READY") and (s["poi"].get("dist_atr") or 0) > md:
+        return False                # far from the zone: most such setups never fill, so they only add noise
     return s["confidence"] >= cfg["min_conf"]
 
 
@@ -323,10 +363,10 @@ def _alert(res, update=False):
     events.add("setup", title, text, level)
 
 
-def process(res, now=None):
+def process(res, now=None, silent=False, defer=False):
     """Log a setup. Returns 'new' for a newly logged setup, 'update' when an already logged, unfilled setup has
-    just reached its zone / READY, or None."""
-    if record(res, now):
+    just reached its zone / READY, or None. With defer=True a wanted new-setup alert is held until the candle closed."""
+    if record(res, now, alert_pending=int(defer and not silent and _wanted(res))):
         return "new"
     s = res.get("setup") or {}
     if res.get("error") or s.get("direction", "none") == "none" or not s.get("poi") or not s.get("factors"):
@@ -352,12 +392,40 @@ def test_alert():
 # ------------------------------------------------------------------ background tracker
 
 
+def _track(present, now, res_by_sig, failed=frozenset()):
+    """After a scan: which logged setups survived the close of their candle, and which alerts were waiting for it.
+    Returns the deferred alerts that can now be sent."""
+    ready = []
+    with _db() as con:
+        rows = con.execute("SELECT id, sig, name, style, close_ts, alert_pending FROM setups WHERE state='pending' AND "
+                           "(confirmed IS NULL OR alert_pending=1)").fetchall()
+        for r in rows:
+            if (r["name"], r["style"]) in failed:          # no data this scan: cannot tell whether it repainted
+                continue
+            here = r["sig"] in present
+            if here:
+                con.execute("UPDATE setups SET last_seen=? WHERE id=?", (now, r["id"]))
+            conf = None
+            if r["close_ts"] and now >= r["close_ts"]:
+                conf = 1 if here else 0
+            elif not here:
+                conf = 0                                    # gone before its candle closed: it repainted
+            if conf is not None:
+                con.execute("UPDATE setups SET confirmed=? WHERE id=? AND confirmed IS NULL", (conf, r["id"]))
+                if r["alert_pending"]:
+                    con.execute("UPDATE setups SET alert_pending=0 WHERE id=?", (r["id"],))
+                    if conf == 1 and r["sig"] in res_by_sig:
+                        ready.append(res_by_sig[r["sig"]])
+    return ready
+
+
 async def scan():
     from . import engine
     new = 0
     with _db() as con:
         baseline = con.execute("SELECT COUNT(*) FROM setups").fetchone()[0] == 0   # first ever scan: log silently
-    pending = []
+    defer = bool(prefs.get()["setups"].get("confirm_close", False))
+    pending, present, res_by_sig, failed = [], set(), {}, set()
     for style in strategy.STYLES:
         for kind, names in (("crypto", list(C.CRYPTO)), ("forex", [n for n in C.FOREX if n != "DXY"])):
             for nm in names:
@@ -365,12 +433,21 @@ async def scan():
                     res = await engine.analyze(nm, style)
                 except Exception as e:
                     _st["error"] = f"{nm} {style}: {e}"
+                    failed.add((nm, style))
                     continue
-                what = process(res)
+                s = res.get("setup") or {}
+                if not res.get("error") and s.get("direction", "none") != "none" and s.get("poi") and s.get("factors"):
+                    present.add(_sig(res))
+                    res_by_sig[_sig(res)] = res
+                what = process(res, silent=baseline, defer=defer)
                 if what == "new":
                     new += 1
-                if what and not baseline and _wanted(res, update=(what == "update")):
+                if what and not baseline and _wanted(res, update=(what == "update")) and not (what == "new" and defer):
                     pending.append((what, res))
+    now = time.time()
+    for res in _track(present, now, res_by_sig, failed):
+        if _wanted(res):
+            pending.append(("new", res))
     pending.sort(key=lambda x: -x[1]["setup"]["confidence"])
     for what, res in pending[:MAX_ALERTS_PER_SCAN]:
         _alert(res, update=(what == "update"))
@@ -401,3 +478,65 @@ async def run():
             _st["error"] = str(e)[:120]
             print("journal error:", e)
         await asyncio.sleep(prefs.get()["setups"].get("scan_seconds", SCAN_EVERY))
+
+
+# ------------------------------------------------------------------ live journal vs backtest
+
+
+def reconcile(job=None, tolerance_min=120):
+    """Compare what the live journal logged with what the backtest says the same rules produce for the same period."""
+    from . import backtest
+    job = job or backtest.latest_done()
+    if not job:
+        return {"error": "Run a backtest first (Markets > Backtest), ideally ending now, so the periods overlap."}
+    p = job["params"]
+    end_ts = job.get("end_ts") or job.get("finished") or time.time()
+    start = end_ts - p["days"] * 86400
+    bt = [t for t in backtest.load_trades(job["id"], "limit") if t.get("signal")]
+    live = [r for r in _rows(9999) if r["kind"] == "crypto" and r["style"] == p["style"] and start <= r["ts"] <= end_ts]
+    if not live:
+        return {"error": "The live journal has no crypto setups in the period of that backtest. Use a backtest that ends now, "
+                         "and wait until the journal has been running for a while."}
+    first = min(r["ts"] for r in live)
+    bt = [t for t in bt if t["ts"] >= first - tolerance_min * 60]          # only where the journal was running
+    used, pairs = set(), []
+    for r in sorted(live, key=lambda r: r["ts"]):
+        best = None
+        for i, t in enumerate(bt):
+            if i in used or t["name"] != r["name"] or t["dir"] != r["dir"] or t["poi"] != r["poi_type"]:
+                continue
+            d = abs(t["ts"] - r["ts"])
+            if d <= tolerance_min * 60 and (best is None or d < best[0]):
+                best = (d, i, t)
+        if best:
+            used.add(best[1])
+            pairs.append((r, best[2]))
+    def rate(rows_, key):
+        w = sum(1 for x in rows_ if key(x) == "win")
+        l = sum(1 for x in rows_ if key(x) == "loss")
+        return (w / (w + l) * 100 if w + l else None, w + l)
+    lw = rate([a for a, b in pairs], lambda x: x["result"])
+    bw = rate([b for a, b in pairs], lambda x: x.get("result"))
+    known = [r for r in live if r["confirmed"] is not None]
+    return {"live": len(live), "backtest": len(bt), "matched": len(pairs),
+            "live_only": len(live) - len(pairs), "backtest_only": len(bt) - len(pairs),
+            "match_rate": (len(pairs) / len(live) * 100) if live else None,
+            "live_win_rate": lw[0], "live_n": lw[1], "backtest_win_rate": bw[0], "backtest_n": bw[1],
+            "repaint_rate": (sum(1 for r in known if r["confirmed"] == 0) / len(known) * 100) if known else None,
+            "repaint_n": len(known), "job": job["id"], "days": p["days"], "style": p["style"]}
+
+
+def reconcile_text(rc):
+    if rc.get("error"):
+        return rc["error"]
+    L = [f"LIVE JOURNAL vs BACKTEST ({rc['style']}, {rc['days']} days, backtest {rc['job']})",
+         f"Live setups logged: {rc['live']}; backtest setups in the same period: {rc['backtest']}",
+         f"Matched (same asset, direction and zone type within 2 h): {rc['matched']} ({rc['match_rate']:.0f}% of live)",
+         f"Only live: {rc['live_only']}, only backtest: {rc['backtest_only']}"]
+    if rc["live_win_rate"] is not None and rc["backtest_win_rate"] is not None:
+        L.append(f"On matched setups that resolved: live {rc['live_win_rate']:.0f}% wins ({rc['live_n']}), "
+                 f"backtest {rc['backtest_win_rate']:.0f}% ({rc['backtest_n']})")
+    if rc["repaint_rate"] is not None:
+        L.append(f"Repainting: {rc['repaint_rate']:.0f}% of {rc['repaint_n']} live setups disappeared before their candle closed")
+    L.append("A low match rate means the live engine (forming candle, one-minute scans) shows setups the closed-candle replay never sees.")
+    return "\n".join(L)

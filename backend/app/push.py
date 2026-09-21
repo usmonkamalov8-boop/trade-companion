@@ -51,6 +51,8 @@ def setup_priority(e, c=None):
     if s.get("enabled", True) and m:
         conf = int(m.group(1))
         prio = 5 if conf >= s["urgent_from"] else 4 if conf >= s["high_from"] else 3 if conf >= s["quiet_below"] else 2
+    if s.get("urgent_needs_ready", True) and prio == 5 and e["title"].startswith("New "):
+        prio = 4                    # a setup that price has not reached yet is worth a look, not an alarm
     if e.get("level") == "success":
         prio = max(prio, 4)
     return prio

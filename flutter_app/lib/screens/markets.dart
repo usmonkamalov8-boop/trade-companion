@@ -714,10 +714,26 @@ class _JournalViewState extends State<JournalView> with AutomaticKeepAliveClient
   List items = [];
   bool loading = false;
   String? err;
+  String? recon;
+  bool reconBusy = false;
   int req = 0;
 
   @override
   bool get wantKeepAlive => true;
+
+  Future<void> _reconcile() async {
+    setState(() {
+      reconBusy = true;
+      recon = null;
+    });
+    try {
+      final d = await Api.get('/api/journal/reconcile') as Map<String, dynamic>;
+      if (mounted) setState(() => recon = '${d['text']}');
+    } catch (e) {
+      if (mounted) setState(() => recon = 'Could not compare: $e');
+    }
+    if (mounted) setState(() => reconBusy = false);
+  }
 
   @override
   void initState() {
@@ -808,6 +824,15 @@ class _JournalViewState extends State<JournalView> with AutomaticKeepAliveClient
         const SizedBox(height: 8),
         Text('Logged ${s['logged']}  -  open ${s['open']}  -  filled ${s['filled']}  -  never filled ${s['unfilled']}',
             style: TextStyle(color: p.muted, fontSize: 12)),
+        if (((s['repaint'] as Map?)?['tracked'] as num?) != null && ((s['repaint'] as Map)['tracked'] as num) > 0 && (s['repaint'] as Map)['rate'] != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              'Repainting: ${((s['repaint'] as Map)['rate'] as num).toStringAsFixed(0)}% of ${(s['repaint'] as Map)['tracked']} setups '
+              'disappeared before their candle closed.',
+              style: TextStyle(color: p.warn, fontSize: 12),
+            ),
+          ),
         if (byConf.isNotEmpty) ...[
           const SizedBox(height: 8),
           for (final b in byConf)
@@ -909,6 +934,15 @@ class _JournalViewState extends State<JournalView> with AutomaticKeepAliveClient
               ]),
             ),
           _statsPanel(p),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton.icon(
+              onPressed: reconBusy ? null : _reconcile,
+              icon: const Icon(Icons.compare_arrows, size: 18),
+              label: Text(reconBusy ? 'Comparing...' : 'Compare with the latest backtest'),
+            ),
+          ),
+          if (recon != null) Panel(child: SelectableText(recon!, style: numStyle.copyWith(fontSize: 12.5, height: 1.45))),
           if (items.isEmpty && !loading && err == null)
             Padding(
               padding: const EdgeInsets.all(20),

@@ -11,6 +11,8 @@ Everything is a mechanical approximation of discretionary concepts. It is analys
 from datetime import datetime, timedelta, timezone
 from . import analytics as A, tz as TZ
 
+RULES_VERSION = "r1-2026-09"      # bump ONLY when a scoring or entry rule changes; every backtest records it
+
 STYLES = {
     "scalp": {"ctx": "4h", "bias": "1h", "setup": "15m", "trigger": "5m", "label": "Scalping", "reach": 4.0},
     "intraday": {"ctx": "1d", "bias": "4h", "setup": "1h", "trigger": "15m", "label": "Intraday", "reach": 6.0},
@@ -536,11 +538,7 @@ def analyze_tf(c, tf):
 def session_info(ts=None, kind="crypto"):
     """ICT kill zones in New York time, plus a market-closed flag for forex weekends."""
     import time as _t
-    try:
-        from zoneinfo import ZoneInfo
-        d = datetime.fromtimestamp(ts or _t.time(), ZoneInfo("America/New_York"))
-    except Exception:
-        d = datetime.fromtimestamp(ts or _t.time(), timezone.utc)
+    d = datetime.fromtimestamp(ts or _t.time(), TZ.ny_zone())      # falls back to fixed EST (not UTC) without tzdata
     h = d.hour + d.minute / 60
     if h >= 20:
         name, kill = "Asian range (kill zone)", True

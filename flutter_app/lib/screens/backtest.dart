@@ -1,10 +1,23 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import '../api.dart';
+import '../minichart.dart';
 import '../theme.dart';
 import 'settings.dart' show styleLabels;
 
-/// Replays the analyst's setups on the last months of crypto history and shows win rates and profitability.
+const _ingredients = {
+  'vp': 'Volume profile confluence',
+  'volvalid': 'Volume validation',
+  'trigger': 'Lower-timeframe confirmation',
+  'sweep': 'Liquidity sweep',
+  'loc': 'Discount / premium location',
+  'rr': 'Reward-to-risk bonus',
+  'htf': 'Against higher timeframes',
+  'session': 'Kill zone',
+  'range': 'Ranging higher timeframe',
+};
+
+/// Replays the analyst's setups on crypto history and tests them against a coin-flip baseline.
 class BacktestView extends StatefulWidget {
   const BacktestView({super.key});
   @override
@@ -13,7 +26,9 @@ class BacktestView extends StatefulWidget {
 
 class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClientMixin {
   int days = 90;
+  int offset = 0;
   String style = 'intraday';
+  String mode = 'limit';
   int fee = 5;
   Map<String, dynamic>? job;
   bool busy = false;
@@ -41,13 +56,18 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
 
   Future<void> _poll() async {
     try {
-      final j = await Api.get('/api/backtest/status') as Map<String, dynamic>;
+      final slim = await Api.get('/api/backtest/status', {'detail': '0'}) as Map<String, dynamic>;
+      final have = job != null && job!['id'] == slim['id'] && job!['overall'] != null;
+      Map<String, dynamic> j = slim;
+      if (slim['status'] == 'done') {
+        j = have ? job! : await Api.get('/api/backtest/status', {'detail': '1'}) as Map<String, dynamic>;
+      }
       if (!mounted) return;
       setState(() {
         job = j;
         err = null;
       });
-      final running = j['status'] == 'running';
+      final running = slim['status'] == 'running';
       if (running && timer == null) {
         timer = Timer.periodic(const Duration(seconds: 4), (_) => _poll());
       } else if (!running) {
@@ -65,7 +85,9 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
       err = null;
     });
     try {
-      await Api.post('/api/backtest/start', {'days': days, 'style': style, 'fee_bp': fee.toDouble(), 'slip_bp': 2.0, 'min_conf': 0});
+      await Api.post('/api/backtest/start',
+          {'days': days, 'offset_days': offset, 'style': style, 'fee_bp': fee.toDouble(), 'slip_bp': 2.0, 'min_conf': 0});
+      job = null;
       await _poll();
     } catch (e) {
       if (mounted) setState(() => err = '$e');
@@ -92,6 +114,12 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
         ]),
       );
 
+  Widget _chip(Pal p, String text, Color c) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(color: Color.lerp(p.surface, c, 0.22), borderRadius: BorderRadius.circular(6)),
+        child: Text(text, style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: c)),
+      );
+
   Widget _tier(Pal p, String title, Map<String, dynamic>? s) {
     if (s == null || (s['filled'] as num) == 0) {
       return Padding(
@@ -100,10 +128,20 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
       );
     }
     final pf = s['profit_factor'];
+    final verdict = '${s['verdict']}';
+    final vcol = verdict.startsWith('positive') ? p.gain : (verdict.startsWith('negative') ? p.loss : p.warn);
+    final wci = s['win_ci'] as List?;
+    final aci = s['avg_net_ci'] as List?;
+    final base = (s['baseline'] as Map?)?.cast<String, dynamic>();
+    final edge = s['edge'];
+    final z = s['edge_z'];
     return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.only(bottom: 14),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(title, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5)),
+        Row(children: [
+          Expanded(child: Text(title, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5))),
+          _chip(p, verdict.toUpperCase(), vcol),
+        ]),
         const SizedBox(height: 4),
         Row(children: [
           _stat(p, _pct(s['win_rate']), 'win rate'),
@@ -111,8 +149,19 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
           _stat(p, _tr(s['total_net_r']), 'total net', color: _col(p, s['total_net_r'])),
           _stat(p, pf == null ? '-' : (pf as num).toStringAsFixed(2), 'profit factor'),
         ]),
+        const SizedBox(height: 2),
         Text('${s['filled']} trades (${s['wins']} wins, ${s['losses']} stops)  -  max drawdown ${(s['max_dd_r'] as num).toStringAsFixed(1)}R  -  fill rate ${_pct(s['fill_rate'])}',
             style: TextStyle(color: p.muted, fontSize: 11.5)),
+        if (wci != null && aci != null)
+          Text('95% range: win rate ${(wci[0] as num).toStringAsFixed(0)}-${(wci[1] as num).toStringAsFixed(0)}%, '
+              'average ${(aci[0] as num).toStringAsFixed(2)} to ${(aci[1] as num).toStringAsFixed(2)}R',
+              style: TextStyle(color: p.muted, fontSize: 11.5)),
+        if (base != null)
+          Text(
+            'Coin-flip entry with the same risk: ${_r(base['avg_net_r'])} (${_pct(base['win_rate'])} wins).'
+            '${edge != null ? '  Strategy vs coin flip: ${_r(edge)}${z != null ? ' (${(z as num).toStringAsFixed(1)} sigma)' : ''}' : ''}',
+            style: TextStyle(color: p.muted, fontSize: 11.5),
+          ),
       ]),
     );
   }
@@ -128,14 +177,59 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 3),
             child: Row(children: [
-              SizedBox(width: 92, child: Text('${byAsset ? b['name'] : b['label']}', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13))),
-              SizedBox(width: 48, child: Text('${b['filled']}', style: numStyle.copyWith(color: p.muted, fontSize: 12.5))),
-              SizedBox(width: 52, child: Text(_pct(b['win_rate']), style: numStyle.copyWith(fontSize: 12.5))),
+              SizedBox(width: 118, child: Text('${byAsset ? b['name'] : b['label']}', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12.5))),
+              SizedBox(width: 40, child: Text('${b['filled']}', style: numStyle.copyWith(color: p.muted, fontSize: 12.5))),
+              SizedBox(width: 48, child: Text(_pct(b['win_rate']), style: numStyle.copyWith(fontSize: 12.5))),
               Expanded(child: Text(_r(b['avg_net_r']), style: numStyle.copyWith(fontSize: 12.5, color: _col(p, b['avg_net_r'])))),
               Text(_tr(b['total_net_r']), style: numStyle.copyWith(fontWeight: FontWeight.w700, fontSize: 12.5, color: _col(p, b['total_net_r']))),
             ]),
           ),
         Text('trades   win rate   avg net R   total', style: TextStyle(color: p.muted, fontSize: 10.5)),
+      ]),
+    );
+  }
+
+  Widget _distRows(Pal p, List items) {
+    if (items.isEmpty) return const SizedBox.shrink();
+    return Panel(
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('FILL RATE BY DISTANCE TO THE ZONE WHEN THE SETUP APPEARS',
+            style: TextStyle(color: p.muted, fontSize: 11, letterSpacing: 1, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 6),
+        for (final b in items)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 3),
+            child: Row(children: [
+              SizedBox(width: 150, child: Text('${b['label']}', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12.5))),
+              SizedBox(width: 60, child: Text('${b['logged']} set', style: numStyle.copyWith(color: p.muted, fontSize: 12))),
+              SizedBox(width: 60, child: Text('${_pct(b['fill_rate'])} filled', style: numStyle.copyWith(fontSize: 12))),
+              Expanded(child: Text(b['avg_net_r'] == null ? '' : _r(b['avg_net_r']), style: numStyle.copyWith(fontSize: 12, color: _col(p, b['avg_net_r'])))),
+            ]),
+          ),
+        Text('Setups far from the zone rarely fill, so alerts for them are mostly noise.', style: TextStyle(color: p.muted, fontSize: 11.5)),
+      ]),
+    );
+  }
+
+  Widget _ablation(Pal p, List items) {
+    if (items.isEmpty) return const SizedBox.shrink();
+    return Panel(
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('DOES EACH INGREDIENT HELP? (AVG NET R WITH vs WITHOUT)',
+            style: TextStyle(color: p.muted, fontSize: 11, letterSpacing: 1, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 6),
+        for (final b in items)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 3),
+            child: Row(children: [
+              Expanded(child: Text(_ingredients['${b['label']}'] ?? '${b['label']}', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12.5))),
+              Text('${_r(b['avg_with'])} (${b['with']})', style: numStyle.copyWith(fontSize: 12, color: _col(p, b['avg_with']))),
+              Text('  vs  ', style: TextStyle(color: p.muted, fontSize: 11)),
+              Text('${_r(b['avg_without'])} (${b['without']})', style: numStyle.copyWith(fontSize: 12, color: _col(p, b['avg_without']))),
+            ]),
+          ),
+        Text('Only ingredients with at least 15 trades on each side are listed. Differences smaller than about 0.2R are noise.',
+            style: TextStyle(color: p.muted, fontSize: 11.5)),
       ]),
     );
   }
@@ -148,8 +242,10 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
     final status = '${j?['status'] ?? 'none'}';
     final running = status == 'running';
     final done = status == 'done';
-    final overall = (j?['overall'] as Map?)?.cast<String, dynamic>();
+    final ov = (j?[mode == 'confirm' ? 'overall_confirm' : 'overall'] as Map?)?.cast<String, dynamic>();
+    final byAsset = (j?[mode == 'confirm' ? 'by_asset_confirm' : 'by_asset'] as List?) ?? [];
     final prm = (j?['params'] as Map?)?.cast<String, dynamic>();
+    final equity = ((ov?['equity'] as List?) ?? []).map((e) => (e as num).toDouble()).toList();
     return RefreshIndicator(
       onRefresh: _poll,
       child: ListView(
@@ -161,10 +257,23 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
               Text('REPLAY THE STRATEGY ON HISTORY', style: TextStyle(color: p.muted, fontSize: 11, letterSpacing: 1, fontWeight: FontWeight.w600)),
               const SizedBox(height: 8),
               Wrap(spacing: 8, children: [
-                for (final d in [30, 60, 90, 180])
+                for (final d in [30, 90, 180, 365])
                   ChoiceChip(label: Text('$d days'), selected: days == d, onSelected: running ? null : (_) => setState(() => days = d)),
               ]),
-              const SizedBox(height: 8),
+              const SizedBox(height: 6),
+              Text('Period ends', style: TextStyle(color: p.muted, fontSize: 12.5)),
+              Wrap(spacing: 8, children: [
+                for (final o in [0, 90, 180, 365])
+                  ChoiceChip(
+                      label: Text(o == 0 ? 'now' : '$o d ago'),
+                      selected: offset == o,
+                      onSelected: running ? null : (_) => setState(() => offset = o)),
+              ]),
+              Padding(
+                padding: const EdgeInsets.only(top: 2, bottom: 6),
+                child: Text('An earlier period is data nobody has looked at yet: the honest test of a result you already saw.',
+                    style: TextStyle(color: p.muted, fontSize: 11.5)),
+              ),
               SegmentedButton<String>(
                 segments: [for (final e in styleLabels.entries) ButtonSegment(value: e.key, label: Text(e.value))],
                 selected: {style},
@@ -197,8 +306,8 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
               ]),
               const SizedBox(height: 6),
               Text(
-                'Runs on the server in the background at low priority (several minutes for all 12 crypto assets). '
-                'Crypto only: forex has no real volume data.',
+                'Runs on the server in the background at low priority (several minutes; longer periods take longer and download '
+                'more history the first time). Crypto only: forex has no real volume data.',
                 style: TextStyle(color: p.muted, fontSize: 11.5, height: 1.4),
               ),
             ]),
@@ -215,28 +324,59 @@ class _BacktestViewState extends State<BacktestView> with AutomaticKeepAliveClie
             ),
           if (status == 'failed' || status == 'cancelled')
             Panel(child: Text('Last run: $status${j?['error'] != null ? ' (${j!['error']})' : ''}', style: TextStyle(color: p.warn))),
-          if (done && overall != null && prm != null) ...[
+          if (done && ov != null && prm != null) ...[
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'limit', label: Text('Blind limit')),
+                ButtonSegment(value: 'confirm', label: Text('Confirmed entry')),
+              ],
+              selected: {mode},
+              onSelectionChanged: (s) => setState(() => mode = s.first),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(2, 6, 2, 6),
+              child: Text(
+                mode == 'limit'
+                    ? 'Blind limit: a resting order at the zone midpoint that fills on touch, whatever the price does next.'
+                    : 'Confirmed entry: wait until price is inside the zone and a 5-minute CHoCH or BOS in the trade direction appears, then enter at its close (stop beyond the zone, same TP1).',
+                style: TextStyle(color: p.muted, fontSize: 12, height: 1.35),
+              ),
+            ),
             Panel(
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('RESULT  -  ${styleLabels['${prm['style']}'] ?? prm['style']}, last ${prm['days']} days, ${(prm['assets'] as List).length} assets',
+                Text(
+                    'RESULT  -  ${styleLabels['${prm['style']}'] ?? prm['style']}, ${prm['days']} days'
+                    '${(prm['offset_days'] as num?) != null && (prm['offset_days'] as num) > 0 ? ', ended ${prm['offset_days']} d ago' : ''}, ${(prm['assets'] as List).length} assets${prm['rules'] != null ? '  -  rules ${prm['rules']}' : ''}',
                     style: TextStyle(color: p.muted, fontSize: 11, letterSpacing: 1, fontWeight: FontWeight.w600)),
                 const SizedBox(height: 10),
-                _tier(p, 'All setups', (overall['all'] as Map?)?.cast<String, dynamic>()),
-                _tier(p, 'Order block / FVG zones', (overall['ob_fvg'] as Map?)?.cast<String, dynamic>()),
-                _tier(p, 'Order block + FVG + volume profile', (overall['ob_fvg_volume'] as Map?)?.cast<String, dynamic>()),
-                Text('"Net" means after fees and slippage. R is your risk per trade: +1R = a win as big as the stop distance.',
+                _tier(p, 'All setups', (ov['all'] as Map?)?.cast<String, dynamic>()),
+                _tier(p, 'Order block / FVG zones', (ov['ob_fvg'] as Map?)?.cast<String, dynamic>()),
+                _tier(p, 'Order block + FVG + volume profile', (ov['ob_fvg_volume'] as Map?)?.cast<String, dynamic>()),
+                if (equity.length > 3) ...[
+                  Text('Cumulative net R over time', style: TextStyle(color: p.muted, fontSize: 11.5)),
+                  const SizedBox(height: 4),
+                  Sparkline(values: equity, color: equity.last >= 0 ? p.gain : p.loss, width: 300, height: 50),
+                  const SizedBox(height: 8),
+                ],
+                Text('"Net" means after fees and slippage. R is your risk per trade: +1R = a win as big as the stop distance. '
+                    'At 1% risk per trade, ${(((ov['all'] as Map)['total_net_r'] as num) * 1).toStringAsFixed(0)}R would be about '
+                    '${(((ov['all'] as Map)['total_net_r'] as num) * 1).toStringAsFixed(0)}% of equity.',
                     style: TextStyle(color: p.muted, fontSize: 11.5)),
               ]),
             ),
-            _rows(p, 'BY ASSET (BEST FIRST)', (j?['by_asset'] as List?) ?? [], byAsset: true),
-            _rows(p, 'BY CONFIDENCE (SETUP QUALITY)', (overall['by_conf'] as List?) ?? []),
-            _rows(p, 'BY ZONE TYPE', (overall['by_poi'] as List?) ?? []),
-            _rows(p, 'BY DIRECTION', (overall['by_dir'] as List?) ?? []),
+            _rows(p, 'BY ASSET (BEST FIRST)', byAsset, byAsset: true),
+            _rows(p, 'BY CONFIDENCE (SETUP QUALITY)', (ov['by_conf'] as List?) ?? []),
+            _distRows(p, (ov['by_dist'] as List?) ?? []),
+            _ablation(p, (ov['ablation'] as List?) ?? []),
+            _rows(p, 'BY TIME (STABLE OVER TIME?)', (ov['by_third'] as List?) ?? []),
+            _rows(p, 'BY ZONE TYPE', (ov['by_poi'] as List?) ?? []),
+            _rows(p, 'BY DIRECTION', (ov['by_dir'] as List?) ?? []),
             Text(
-              'How to read this: a strategy needs a profit factor above 1 and a positive average net R over a large number of trades. '
-              'Fewer than about 30 trades in a row means the number is mostly noise. Same rules as the live journal: no look-ahead, '
-              'stop wins if stop and TP1 share a candle, TP1 is the exit. News, funding and partial exits are not modelled, and '
-              'past results do not predict future results.',
+              'How to read this: "positive (significant)" means the 95% range for the average net R is above zero; anything else '
+              'is not proof. Compare with the coin-flip line: a strategy that does not beat entering at random with the same risk '
+              'has no edge. Assets are correlated, so 12 assets are not 12 independent tests. Same rules as the live journal: no '
+              'look-ahead, TP1 is the exit, the stop wins if stop and TP1 share a candle. News, funding and partial exits are not '
+              'modelled. Past results do not predict future results.',
               style: TextStyle(color: p.muted, fontSize: 12, height: 1.4),
             ),
           ],

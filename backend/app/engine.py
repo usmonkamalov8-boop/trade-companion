@@ -532,12 +532,13 @@ async def chart_data(name, tf, style=None, n=100):
 
 
 def backtest_text(name=None):
-    job = backtest.latest()
+    job = backtest.latest_done() or backtest.latest()
     if not job:
-        return ("No backtest has been run yet. Start one in the app: Markets > Backtest (it replays the last 30-180 days "
+        return ("No backtest has been run yet. Start one in the app: Markets > Backtest (it replays 30-365 days "
                 "and takes a few minutes), or say \"run backtest\".")
     p = job["params"]
-    head = f"BACKTEST - {strategy.STYLES[p['style']]['label']}, last {p['days']} days, fees {p['fee_bp'] + p['slip_bp']:.0f} bp per side"
+    off = f", ending {p['offset_days']} days ago" if p.get("offset_days") else ""
+    head = f"BACKTEST - {strategy.STYLES[p['style']]['label']}, {p['days']} days{off}, fees {p['fee_bp'] + p['slip_bp']:.0f} bp per side"
     if job["status"] == "running":
         pr = job["progress"]
         return f"{head}\nRunning: {pr['pct']}% ({pr.get('current') or '-'}, {pr['done']}/{pr['total']} assets). Check again in a few minutes."
@@ -547,23 +548,36 @@ def backtest_text(name=None):
     def line(lab, s):
         if not s or not s["filled"]:
             return f"{lab}: no filled setups"
-        return (f"{lab}: {s['filled']} trades, win rate {s['win_rate']:.0f}%, average {s['avg_net_r']:+.2f}R after costs, "
-                f"total {s['total_net_r']:+.1f}R, profit factor {s['profit_factor'] or 0:.2f}, max drawdown {s['max_dd_r']:.1f}R")
+        rng = f" (95% range {s['win_ci'][0]:.0f}-{s['win_ci'][1]:.0f}%)" if s.get("win_ci") else ""
+        base = f"; a random entry with the same risk: {s['baseline']['avg_net_r']:+.2f}R" if s.get("baseline") else ""
+        return (f"{lab}: {s['filled']} trades, win rate {s['win_rate']:.0f}%{rng}, average {s['avg_net_r']:+.2f}R after costs, "
+                f"total {s['total_net_r']:+.1f}R, profit factor {s['profit_factor'] or 0:.2f}, max drawdown {s['max_dd_r']:.1f}R"
+                f" - {s['verdict']}{base}")
 
     L = [head, ""]
     if name and name in job["assets"] and "all" in job["assets"][name]:
         r = job["assets"][name]
-        L += [f"{name}", line("All setups", r["all"]), line("Order block / FVG zones", r["ob_fvg"]),
+        L += [f"{name}", line("Blind limit, all setups", r["all"]), line("Order block / FVG zones", r["ob_fvg"]),
               line("OB + FVG + volume profile", r["ob_fvg_volume"])]
+        rc = (job.get("assets_confirm") or {}).get(name)
+        if rc and "all" in rc:
+            L.append(line("Confirmed entry", rc["all"]))
         L += ["By confidence: " + "; ".join(f"{b['label']}: {b['filled']} trades, {b['win_rate']:.0f}% wins" for b in r["by_conf"] if b["filled"])]
     else:
         o = job["overall"]
-        L += [line("All assets, all setups", o["all"]), line("Order block / FVG zones", o["ob_fvg"]),
-              line("OB + FVG + volume profile", o["ob_fvg_volume"]), "", "By asset (net R):"]
+        L += [line("Blind limit, all setups", o["all"]), line("Order block / FVG zones", o["ob_fvg"]),
+              line("OB + FVG + volume profile", o["ob_fvg_volume"])]
+        oc = job.get("overall_confirm")
+        if oc:
+            L += [line("Confirmed entry (wait for a 5m CHoCH/BOS in the zone)", oc["all"])]
+        L += ["", "By asset (net R):"]
         L += [f"- {a['name']}: {a['filled']} trades, {a['win_rate'] or 0:.0f}% wins, {a['total_net_r']:+.1f}R" for a in job.get("by_asset", [])]
         L += ["", "By confidence: " + "; ".join(f"{b['label']}: {b['filled']} trades, {b['win_rate']:.0f}% wins, {b['avg_net_r']:+.2f}R" for b in o["by_conf"] if b["filled"])]
-    L += ["", "Replay of the same rules with no look-ahead; a win is TP1 before the stop; fees and slippage included; news, funding and partial exits are not modelled. "
-          "Past results do not predict future results.", DISCLAIMER]
+        if o.get("by_dist"):
+            L.append("Fill rate by distance to the zone: " + "; ".join(f"{b['label']}: {b['fill_rate'] or 0:.0f}%" for b in o["by_dist"]))
+    L += ["", "Same rules as the live journal: no look-ahead, a win is TP1 before the stop, fees and slippage included. "
+          "'Significant' means the 95% range excludes zero; smaller samples cannot prove anything. Past results do not "
+          "predict future results.", DISCLAIMER]
     return "\n".join(L)
 
 
@@ -685,6 +699,12 @@ def journal_text(style=None, name=None):
                  f"stopped out: {st['losses']}. Average result {st['avg_r']:+.2f}R (before fees).")
     else:
         L.append("No setup has resolved yet.")
+    rp = st.get("repaint") or {}
+    if rp.get("tracked"):
+        c, v = rp["confirmed"], rp["vanished"]
+        L.append(f"Repainting: {rp['rate']:.0f}% of {rp['tracked']} setups disappeared before their candle closed"
+                 + (f"; those that survived: {c['win_rate']:.0f}% TP1 ({c['n']} resolved)" if c["n"] else "")
+                 + (f", those that vanished: {v['win_rate']:.0f}% ({v['n']})" if v["n"] else "") + ".")
     rows = [b for b in st["by_conf"] if b["n"]]
     if rows:
         L += ["", "By confidence (setup quality before news):"]
