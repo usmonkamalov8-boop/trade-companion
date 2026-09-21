@@ -3,5 +3,9 @@
   "calendar": {},
   "analyst": {
     "style": "scalp"
+  },
+  "general": {},
+  "setups": {
+    "min_conf": 60
   }
 }
