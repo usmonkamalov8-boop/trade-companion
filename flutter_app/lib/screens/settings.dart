@@ -15,6 +15,7 @@ const moduleLabels = {
   'fib': 'Fibonacci and premium / discount',
   'trend': 'Trendlines, channels, dynamic levels',
   'liquidity': 'Liquidity and sweeps',
+  'volume': 'Volume profile (POC, value area) and volume checks',
   'ict': 'ICT context (kill zones, day and week levels)',
 };
 

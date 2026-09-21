@@ -8,7 +8,7 @@ Points of Interest (confluence of the above) and Top-Down alignment. Setups are 
 three styles: scalp, intraday and swing.
 
 Everything is a mechanical approximation of discretionary concepts. It is analysis, not advice."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from . import analytics as A
 
 STYLES = {
@@ -29,11 +29,74 @@ TD_W = {
 def tfl(tf):
     return TF_LABEL.get(tf, tf)
 
-MODULES = ("structure", "ob", "fvg", "sd", "sr", "fib", "trend", "liquidity", "ict", "poi")
+MODULES = ("structure", "ob", "fvg", "sd", "sr", "fib", "trend", "liquidity", "volume", "ict", "poi")
 ROLE_W = {"ctx": 0.2, "bias": 0.4, "setup": 0.25, "trigger": 0.15}
 
 
 # ------------------------------------------------------------------ primitives
+
+
+VP_BARS = {"5m": 288, "15m": 192, "1h": 168, "4h": 180, "1d": 90, "1w": 52, "1M": 24}
+VP_LABEL = {"5m": "1-day", "15m": "2-day", "1h": "7-day", "4h": "30-day", "1d": "3-month", "1w": "1-year", "1M": "2-year"}
+
+
+def _vratio(v, a, b, look=20):
+    """Average volume of candles a..b relative to the 'look' candles before a. None without volume data."""
+    if b < a:
+        a, b = b, a
+    if not v or a < 5 or b >= len(v):
+        return None
+    base = v[max(0, a - look):a]
+    mb = sum(base) / len(base)
+    if mb <= 0:
+        return None
+    seg = v[a:b + 1]
+    return (sum(seg) / len(seg)) / mb
+
+
+def volume_profile(c, n_bars, bins=40, va_pct=0.70):
+    """Basic volume profile from candle volume spread evenly over each candle's range:
+    POC (price with the most volume) and the value area (70% of volume) around it."""
+    v = c.get("v") or []
+    m = len(c["c"])
+    i0 = max(0, m - n_bars)
+    if not v or len(v) < m or sum(v[i0:]) <= 0:
+        return None
+    hi, lo = max(c["h"][i0:]), min(c["l"][i0:])
+    if hi <= lo:
+        return None
+    step = (hi - lo) / bins
+    vol = [0.0] * bins
+    for i in range(i0, m):
+        if v[i] <= 0:
+            continue
+        b0 = min(bins - 1, int((c["l"][i] - lo) / step))
+        b1 = min(bins - 1, int((c["h"][i] - lo) / step))
+        share = v[i] / (b1 - b0 + 1)
+        for b in range(b0, b1 + 1):
+            vol[b] += share
+    poc = max(range(bins), key=lambda b: vol[b])
+    total, acc = sum(vol), vol[poc]
+    lb = hb = poc
+    while acc < total * va_pct and (lb > 0 or hb < bins - 1):
+        down = vol[lb - 1] if lb > 0 else -1.0
+        up = vol[hb + 1] if hb < bins - 1 else -1.0
+        if up >= down:
+            hb += 1
+            acc += vol[hb]
+        else:
+            lb -= 1
+            acc += vol[lb]
+    return {"poc": lo + (poc + 0.5) * step, "vah": lo + (hb + 1) * step, "val": lo + lb * step,
+            "lo": lo, "hi": hi, "bars": m - i0}
+
+
+def _vp_pos(px, vp):
+    if px > vp["vah"]:
+        return "above the value area"
+    if px < vp["val"]:
+        return "below the value area"
+    return "inside the value area"
 
 
 def _atr_list(c, n=14):
@@ -148,7 +211,7 @@ def order_blocks(c, st, atr):
                     dead = j
                     break
         z = {"type": "OB", "dir": d, "low": zl, "high": zh, "idx": idx, "formed": i, "strength": move / a,
-             "fresh": not tested, "src": ev["type"], "age": n - 1 - idx}
+             "fresh": not tested, "src": ev["type"], "age": n - 1 - idx, "vol": _vratio(c.get("v"), idx, i)}
         if dead is None:
             active.append(z)
         elif n - 1 - dead <= 60:
@@ -171,7 +234,7 @@ def fvgs(c, atr, max_age=120):
             if mn is not None and mn < zh:
                 fill, zh = (zh - mn) / (zh - zl), mn
             out.append({"type": "FVG", "dir": 1, "low": zl, "high": zh, "idx": i - 1, "fill": fill,
-                        "fresh": fill == 0.0, "age": n - 1 - i})
+                        "fresh": fill == 0.0, "age": n - 1 - i, "vol": _vratio(c.get("v"), i - 1, i - 1)})
         elif l[i - 2] - h[i] > 0.12 * a and cl[i - 1] < o[i - 1]:
             zl, zh = h[i], l[i - 2]
             mx = max(h[i + 1:]) if i + 1 < n else None
@@ -181,7 +244,7 @@ def fvgs(c, atr, max_age=120):
             if mx is not None and mx > zl:
                 fill, zl = (mx - zl) / (zh - zl), mx
             out.append({"type": "FVG", "dir": -1, "low": zl, "high": zh, "idx": i - 1, "fill": fill,
-                        "fresh": fill == 0.0, "age": n - 1 - i})
+                        "fresh": fill == 0.0, "age": n - 1 - i, "vol": _vratio(c.get("v"), i - 1, i - 1)})
     return out[-6:]
 
 
@@ -223,7 +286,8 @@ def sd_zones(c, atr, max_age=150):
                 break
         if dead:
             continue
-        z.update({"idx": bs, "formed": j, "strength": rng / a, "tests": tests, "fresh": tests == 0, "age": n - 1 - bs})
+        z.update({"idx": bs, "formed": j, "strength": rng / a, "tests": tests, "fresh": tests == 0, "age": n - 1 - bs,
+                  "vol": _vratio(c.get("v"), j, j)})
         zones.append(z)
     out = []
     for z in sorted(zones, key=lambda x: -x["formed"]):   # newest first, drop heavy overlaps
@@ -452,6 +516,7 @@ def analyze_tf(c, tf):
         if base_v > 0:
             vr = (sum(v[-4:-1]) / 3.0) / base_v        # last 3 closed bars against the previous 30
     return {
+        "vp": volume_profile(c, VP_BARS.get(tf, 150)),
         "rsi": rs[-1], "macd": A.macd_hist(c["c"]), "div": divergence(alt, rs, n), "vol_ratio": vr,
         "tf": tf, "n": n, "price": px, "atr": a, "atr_pct": a / px * 100, "atr_ratio": a / (sum(win) / len(win)),
         "trend": trend, "trend_label": label if sw else ("structure " + ("up" if st["trend"] == 1 else "down" if st["trend"] == -1 else "flat")),
@@ -490,7 +555,12 @@ def session_info(ts=None, kind="crypto"):
         name, kill = "Between sessions", False
     wd = d.weekday()
     closed = kind == "forex" and (wd == 5 or (wd == 4 and h >= 17) or (wd == 6 and h < 17))
-    return {"name": name, "kill": kill, "closed": closed, "ny_time": d.strftime("%H:%M")}
+    out = {"name": name, "kill": kill, "closed": closed, "ny_time": d.strftime("%H:%M")}
+    if closed:      # spot forex and gold: closed from Friday 17:00 to Sunday 17:00 New York time
+        nxt = (d + timedelta(days={4: 2, 5: 1, 6: 0}[wd])).replace(hour=17, minute=0, second=0, microsecond=0)
+        out["reopen_min"] = int((nxt - d).total_seconds() // 60)
+        out["reopen_text"] = f"Sunday {nxt:%H:%M} New York ({nxt.astimezone(timezone.utc):%H:%M} UTC)"
+    return out
 
 
 def ict_context(tfs, kind, ts=None):
@@ -506,8 +576,8 @@ def ict_context(tfs, kind, ts=None):
 # ------------------------------------------------------------- POI and setups
 
 
-def _z(typ, tf, low, high, base, fresh=True, note=""):
-    return {"type": typ, "tf": tf, "low": low, "high": high, "base": base, "fresh": fresh, "note": note}
+def _z(typ, tf, low, high, base, fresh=True, note="", vol=None):
+    return {"type": typ, "tf": tf, "low": low, "high": high, "base": base, "fresh": fresh, "note": note, "vol": vol}
 
 
 def collect_zones(s, per, price, mods):
@@ -523,7 +593,7 @@ def collect_zones(s, per, price, mods):
                 if z["dir"] == s:
                     zs.append(_z("OB", tf, z["low"], z["high"],
                                  3.0 + (0.7 if z["src"] == "CHoCH" else 0) + (0.5 if z["fresh"] else 0)
-                                 + min(1.0, z["strength"] / 8) + hb, z["fresh"], f"{side} OB after {z['src']}"))
+                                 + min(1.0, z["strength"] / 8) + hb, z["fresh"], f"{side} OB after {z['src']}", z.get("vol")))
             for z in a["breakers"]:
                 if z["dir"] == s:
                     zs.append(_z("Breaker", tf, z["low"], z["high"], 2.2 + hb, False, f"{side} breaker block"))
@@ -531,13 +601,13 @@ def collect_zones(s, per, price, mods):
             for z in a["fvgs"]:
                 if z["dir"] == s:
                     zs.append(_z("FVG", tf, z["low"], z["high"], 2.0 + (0.5 if z["fresh"] else 0) + hb, z["fresh"],
-                                 f"{side} FVG" + ("" if z["fresh"] else f" ({z['fill'] * 100:.0f}% filled)")))
+                                 f"{side} FVG" + ("" if z["fresh"] else f" ({z['fill'] * 100:.0f}% filled)"), z.get("vol")))
         if mods.get("sd", True):
             for z in a["sd"]:
                 if z["dir"] == s:
                     zs.append(_z("Demand" if s == 1 else "Supply", tf, z["low"], z["high"],
                                  2.5 + (0.5 if z["fresh"] else 0) + min(1.0, z["strength"] / 8) + hb, z["fresh"],
-                                 f"{z['pattern']} {'fresh' if z['fresh'] else 'tested'}"))
+                                 f"{z['pattern']} {'fresh' if z['fresh'] else 'tested'}", z.get("vol")))
         if mods.get("sr", True):
             for x in a["sr"]:
                 ok = x["price"] < price if s == 1 else x["price"] > price
@@ -621,6 +691,16 @@ def collect_targets(s, entry, per, ict, mods, atr_setup):
             for k, v in f["ext"].items():
                 if (v > entry) if s == 1 else (v < entry):
                     c.append((v, f"fib {k} extension"))
+    if mods.get("volume", True):
+        for role in ("setup", "bias"):
+            a = per.get(role)
+            vp = a.get("vp") if a else None
+            if not vp:
+                continue
+            for k, lab in (("poc", "POC"), ("vah", "value area high"), ("val", "value area low")):
+                v_ = vp[k]
+                if (v_ > entry) if s == 1 else (v_ < entry):
+                    c.append((v_, f"{tfl(a['tf'])} {lab} (volume)"))
     if mods.get("ict", True):
         for key, lab in (("pdh", "previous day high"), ("pwh", "previous week high")) if s == 1 else (("pdl", "previous day low"), ("pwl", "previous week low")):
             v = ict.get(key)
@@ -722,6 +802,13 @@ def observations(s, per, per_all, style, kind, ict):
             else:
                 out.append({"text": f"{dv['type'].capitalize()} RSI divergence on {tf} supports the {word}.", "against": False})
     a = per.get("setup")
+    vp = a.get("vp") if a else None
+    if vp:
+        pos = _vp_pos(a["price"], vp)
+        if (s == 1 and pos.startswith("above")) or (s == -1 and pos.startswith("below")):
+            out.append({"text": f"Price is {pos} on {tfl(a['tf'])} ({VP_LABEL[a['tf']]} profile): entering here chases the move, the POC at {A.fmt(vp['poc'], None)} is where volume was accepted.", "against": True})
+        else:
+            out.append({"text": f"Price is {pos} on {tfl(a['tf'])} ({VP_LABEL[a['tf']]} profile), POC {A.fmt(vp['poc'], None)}.", "against": False})
     if a and a.get("vol_ratio") is not None:
         vr = a["vol_ratio"]
         if vr < 0.7:
@@ -855,6 +942,33 @@ def make_setup(name, style, per, ict, dec, mods, kind, per_all=None, news=None):
         f"{align * 100:+.0f}% weighted agreement of {', '.join(tfl(t) for t in per_all)} with the {word}")
     add("poi", "Point of interest", min(24.0, poi["score"] * 3.0),
         f"{poi['type']} on {poi['tf']} ({poi['note']}); confluence: {conf_txt}; score {poi['score']:.1f}")
+    vp_tags = []
+    if mods.get("volume", True):
+        tol = 0.15 * a
+        for role in ("setup", "bias"):
+            x = per.get(role)
+            vp = x.get("vp") if x else None
+            if not vp:
+                continue
+            edge, en = (vp["val"], "VAL") if s == 1 else (vp["vah"], "VAH")
+            if min(poi["high"], vp["poc"] + tol) >= max(poi["low"], vp["poc"] - tol):
+                vp_tags.append(f"POC {tfl(x['tf'])}")
+            if min(poi["high"], edge + tol) >= max(poi["low"], edge - tol):
+                vp_tags.append(f"{en} {tfl(x['tf'])}")
+        vp_tags = list(dict.fromkeys(vp_tags))
+        have_vp = any(per.get(r) and per[r].get("vp") for r in ("setup", "bias"))
+        if vp_tags:
+            add("vp", "Volume profile confluence", 6 + (2 if len(vp_tags) >= 2 else 0),
+                f"the zone sits at {', '.join(vp_tags)}: exchange volume agrees with the SMC zone")
+            poi["confluence"] = list(poi["confluence"]) + vp_tags
+        elif have_vp:
+            missing.append({"label": "the zone lining up with the POC or the value-area edge", "pts": 6})
+        pv = poi.get("vol")
+        if pv is not None:
+            if pv >= 1.3:
+                add("volvalid", "Volume validation", 4, f"the {poi['type']} formed on {pv:.1f}x the average volume: significant participation")
+            elif pv < 0.75:
+                add("volvalid", "Volume validation", -4, f"the {poi['type']} formed on only {pv:.1f}x the average volume: likely noise")
     if trig_ok:
         add("trigger", "Lower-timeframe confirmation", 10, trig_txt)
     else:
@@ -952,16 +1066,83 @@ def make_setup(name, style, per, ict, dec, mods, kind, per_all=None, news=None):
         "alt_pois": [{"type": p["type"], "tf": p["tf"], "low": p["low"], "high": p["high"]} for p in pois[1:]],
         "entry": entry, "stop": sl, "tp1": tp1, "tp2": tp2, "notes": notes, "refine": refine,
         "factors": fx, "missing": missing, "conf_raw": conf_raw, "news": nfx, "observations": obs,
-        "zone": {"low": zl, "high": zh},
+        "zone": {"low": zl, "high": zh}, "vp_tags": vp_tags, "poi_vol": poi.get("vol"),
         "strings": {"entry": f"{fmt(zl)} - {fmt(zh)}", "stop": fmt(sl),
                     "tp1": fmt(tp1["price"]), "tp2": fmt(tp2["price"])},
     })
     return res
 
 
+def _data_age_min(tfs, ts):
+    c = tfs.get("5m") or tfs.get("15m")
+    if not c or not c["t"]:
+        return None
+    t = c["t"][-1]
+    t = t / 1000.0 if t > 1e11 else float(t)
+    return max(0.0, (ts - t) / 60.0)
+
+
+def closed_result(name, kind, style, tfs, dec, ict, why, age=None):
+    """Forex weekend / stale-data guard: no signals and no analysis, only a clear status."""
+    cfg = STYLES[style]
+    px = None
+    for tf in ("5m", "15m", "1h", "4h", "1d"):
+        c = tfs.get(tf)
+        if c and c["c"]:
+            px = c["c"][-1]
+            break
+    sess = ict["session"]
+    if why == "weekend":
+        status = "MARKET CLOSED"
+        notes = ["Market Closed (Weekend). No signals or analysis are produced while forex and gold are closed; "
+                 "the price shown is the last close.",
+                 f"Reopens {sess.get('reopen_text', 'Sunday 17:00 New York')}, in "
+                 f"{sess.get('reopen_min', 0) // 60} h {sess.get('reopen_min', 0) % 60} min.",
+                 "Crypto trades 24/7."]
+    else:
+        status = "NO DATA"
+        notes = [f"No fresh price data: the last candle is {age / 60:.1f} hours old. The market may be closed "
+                 "(holiday) or the data feed is delayed. No signals are produced."]
+    setup = {"style": style, "label": cfg["label"], "roles": {r: cfg[r] for r in ROLE_W}, "topdown": 0.0,
+             "direction": "none", "status": status, "confidence": 0, "conf_label": "-", "poi": None, "notes": notes,
+             "risk": {}, "factors": [], "missing": [], "observations": []}
+    return {"name": name, "kind": kind, "style": style, "price": px, "dec": dec, "ict": ict, "setup": setup,
+            "_per": {}, "_all": {}, "confidence": 0, "closed": True, "closed_why": why}
+
+
+def active_zones(per, per_all, reach):
+    """Order blocks, FVGs and supply/demand zones on the setup and bias charts that are still active
+    and within `reach` ATR of price."""
+    a = per.get("setup")
+    if not a:
+        return {"count": 0, "bull": 0, "bear": 0, "in_zone": False, "nearest": None}
+    px, atr = a["price"], a["atr"]
+    zs = []
+    for role in ("setup", "bias"):
+        x = per.get(role)
+        if not x:
+            continue
+        for z in list(x["obs"]) + list(x["fvgs"]) + list(x["sd"]):
+            dist = 0.0 if z["low"] <= px <= z["high"] else min(abs(z["low"] - px), abs(z["high"] - px))
+            if dist <= reach * atr:
+                zs.append({"type": {"Demand": "Demand", "Supply": "Supply"}.get(z["type"], z["type"]), "tf": tfl(x["tf"]),
+                           "dir": z["dir"], "low": z["low"], "high": z["high"], "dist_atr": dist / atr})
+    zs.sort(key=lambda z: z["dist_atr"])
+    return {"count": len(zs), "bull": sum(1 for z in zs if z["dir"] == 1), "bear": sum(1 for z in zs if z["dir"] == -1),
+            "in_zone": any(z["dist_atr"] == 0 for z in zs), "nearest": zs[0] if zs else None}
+
+
 def build(name, kind, style, tfs, dec=None, mods=None, ts=None, news=None):
     mods = mods or {}
     cfg = STYLES[style]
+    ict = ict_context(tfs, kind, ts)
+    if kind == "forex":                       # weekend / stale-data guard: never analyse a closed market
+        if ict["session"]["closed"]:
+            return closed_result(name, kind, style, tfs, dec, ict, "weekend")
+        import time as _t
+        age = _data_age_min(tfs, ts or _t.time())
+        if age is not None and age > 60:
+            return closed_result(name, kind, style, tfs, dec, ict, "stale", age)
     per_all = {}
     for tf in ALL_TFS:
         c = tfs.get(tf)
@@ -971,11 +1152,11 @@ def build(name, kind, style, tfs, dec=None, mods=None, ts=None, news=None):
     per = {role: per_all.get(cfg[role]) for role in ROLE_W}
     if not per["setup"] or not per["bias"]:
         return {"name": name, "kind": kind, "style": style, "error": "not enough price history for this style"}
-    ict = ict_context(tfs, kind, ts)
     setup = make_setup(name, style, per, ict, dec, mods, kind, per_all, news)
     px = per["setup"]["price"]
     return {"name": name, "kind": kind, "style": style, "price": px, "dec": dec, "ict": ict, "setup": setup,
-            "_per": per, "_all": per_all, "confidence": setup["confidence"]}
+            "_per": per, "_all": per_all, "confidence": setup["confidence"],
+            "zones": active_zones(per, per_all, cfg["reach"])}
 
 
 # --------------------------------------------------------------------- report
@@ -1031,6 +1212,8 @@ def xray_text(res, label):
     fmt = lambda x: A.fmt(x, dec)
     cfg = STYLES[res["style"]]
     head = f"TRADE X-RAY - {label}, {cfg['label']}"
+    if res.get("closed"):
+        return head + "\n\n" + "\n".join(s["notes"])
     if s["direction"] == "none" or not s.get("factors"):
         return head + "\n\nNo scored setup right now.\n" + "\n".join("- " + n for n in s["notes"])
     total = sum(f["pts"] for f in s["factors"])
@@ -1081,6 +1264,12 @@ def report_text(res, label, focus=None, mods=None):
         return f"{label}: {res['error']}."
     if focus == "xray":
         return xray_text(res, label)
+    if res.get("closed"):
+        st = res["setup"]
+        px_ = A.fmt(res["price"], res["dec"]) if res.get("price") is not None else "-"
+        return "\n".join([f"{label} - {STYLES[res['style']]['label']} analysis", "",
+                          f"{'MARKET CLOSED (WEEKEND)' if res['closed_why'] == 'weekend' else 'NO FRESH DATA'}",
+                          f"Last price {px_}", ""] + st["notes"])
     per, setup, ict, style = res["_per"], res["setup"], res["ict"], res["style"]
     cfg = STYLES[style]
     dec = res["dec"]
@@ -1183,6 +1372,29 @@ def report_text(res, label, focus=None, mods=None):
     z.append("EMAs: " + ", ".join(f"{k} = {fmt(v)}" for k, v in e.items() if v))
     sec["trend"] = z
 
+    z = ["VOLUME PROFILE AND VOLUME VALIDATION"]
+    if res["kind"] == "forex":
+        z.append("Not available: spot forex and gold have no real volume in this data.")
+    else:
+        seen = []
+        for t in (cfg["setup"], cfg["bias"], "1d", "1w"):
+            x = allp.get(t)
+            vp = x.get("vp") if x else None
+            if vp and t not in seen:
+                seen.append(t)
+                z.append(f"{tfl(t)} ({VP_LABEL[t]} profile): POC {fmt(vp['poc'])} | value area {fmt(vp['val'])} - {fmt(vp['vah'])} | price {_vp_pos(px, vp)}")
+        zs = sorted([q for q in list(s_a["obs"]) + list(s_a["fvgs"]) if q.get("vol") is not None],
+                    key=lambda q: abs((q["low"] + q["high"]) / 2 - px))[:4]
+        for q in zs:
+            vv = q["vol"]
+            verdict = "significant" if vv >= 1.3 else ("low, likely noise" if vv < 0.75 else "normal")
+            z.append(f"{'Bullish' if q['dir'] == 1 else 'Bearish'} {q['type']} {fmt(q['low'])} - {fmt(q['high'])}: formed on {vv:.1f}x average volume ({verdict})")
+        if setup.get("vp_tags"):
+            z.append(f"Setup zone lines up with: {', '.join(setup['vp_tags'])}")
+        if len(z) == 1:
+            z.append("No volume data for this asset.")
+    sec["volume"] = z
+
     lq = s_a["liq"]
     z = ["LIQUIDITY (" + tfl(s_a["tf"]) + ")"]
     z.append(f"Buy-side above: {_levels_line(lq['bsl'], fmt)}; sell-side below: {_levels_line(lq['ssl'], fmt)}")
@@ -1230,7 +1442,7 @@ def report_text(res, label, focus=None, mods=None):
     sec["setup"] = P
 
     head = [f"{label} - {cfg['label']} analysis", f"Price {fmt(px)}"]
-    order = ["topdown", "sd", "sr", "fib", "trend", "liquidity", "ict", "setup"]
+    order = ["topdown", "sd", "sr", "fib", "trend", "liquidity", "volume", "ict", "setup"]
     if focus and focus in sec and focus not in ("setup", "poi"):
         parts = [sec[focus]]
         if focus != "topdown":
@@ -1251,8 +1463,27 @@ def public(res, label):
     s, dec = res["setup"], res["dec"]
     fmt = lambda x: A.fmt(x, dec)
     per = res["_per"]
+    sess = res["ict"]["session"]
+    empty_zones = {"count": 0, "bull": 0, "bear": 0, "in_zone": False, "nearest": None}
+    if res.get("closed"):
+        return {"name": res["name"], "label": label, "kind": res["kind"], "style": res["style"], "price": res["price"],
+                "price_str": fmt(res["price"]) if res["price"] is not None else "-", "direction": "none",
+                "status": s["status"], "confidence": 0, "conf_label": "-", "conf_raw": 0, "roles": s["roles"],
+                "notes": s["notes"], "session": sess["name"], "tf": [], "open": False,
+                "market_status": "Closed (Weekend)" if res["closed_why"] == "weekend" else "No fresh data",
+                "bias": "Closed", "bias_pct": 0, "zones": empty_zones, "reopen": sess.get("reopen_text"),
+                "reopen_min": sess.get("reopen_min")}
+    td = s.get("topdown", 0.0)
+    zn = res.get("zones") or empty_zones
+    nz = zn.get("nearest")
+    zones = {"count": zn["count"], "bull": zn["bull"], "bear": zn["bear"], "in_zone": zn["in_zone"],
+             "nearest": (f"{'Bull' if nz['dir'] == 1 else 'Bear'} {nz['type']} {nz['tf']} {fmt(nz['low'])} - {fmt(nz['high'])}"
+                         + (" (price inside)" if nz["dist_atr"] == 0 else f" ({nz['dist_atr']:.1f} ATR away)")) if nz else None}
     out = {"name": res["name"], "label": label, "kind": res["kind"], "style": res["style"], "price": res["price"],
            "price_str": fmt(res["price"]), "direction": s["direction"], "status": s["status"],
+           "open": True, "market_status": "Open 24/7" if res["kind"] == "crypto" else "Open",
+           "bias": "Bullish" if td >= 0.2 else ("Bearish" if td <= -0.2 else "Neutral"), "bias_pct": int(round(td * 100)),
+           "zones": zones,
            "confidence": s["confidence"], "conf_label": s.get("conf_label", "-"),
            "roles": s["roles"], "notes": s["notes"][:5], "session": res["ict"]["session"]["name"],
            "tf": []}
@@ -1265,6 +1496,13 @@ def public(res, label):
             m = tf_summary(allp[t], fmt)
             tag = ", ".join(roles.get(t, [])) or ("micro entry" if t == "5m" else "")
             out["tf"].append({**m, "role": tag})
+    sp = per.get("setup")
+    vp = sp.get("vp") if sp else None
+    if vp:
+        out["vp"] = {"tf": tfl(sp["tf"]), "window": VP_LABEL[sp["tf"]], "poc": fmt(vp["poc"]), "vah": fmt(vp["vah"]),
+                     "val": fmt(vp["val"]), "pos": _vp_pos(sp["price"], vp).replace(" the value area", " VA").replace("inside VA", "inside VA")}
+    if s.get("vp_tags"):
+        out["vp_tags"] = s["vp_tags"]
     nfx = s.get("news")
     out["conf_raw"] = s.get("conf_raw", s["confidence"])
     if nfx and nfx["pts"]:

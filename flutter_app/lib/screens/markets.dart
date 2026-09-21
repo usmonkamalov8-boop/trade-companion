@@ -17,7 +17,7 @@ class MarketsPage extends StatelessWidget {
             bottom: const TabBar(isScrollable: true, tabs: [
               Tab(text: 'Crypto'),
               Tab(text: 'Forex and gold'),
-              Tab(text: 'Setups'),
+              Tab(text: 'Screener'),
               Tab(text: 'Journal'),
               Tab(text: 'Calendar'),
               Tab(text: 'News'),
@@ -102,9 +102,13 @@ class _MarketViewState extends State<MarketView> with AutomaticKeepAliveClientMi
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
           Expanded(child: Text('${r['label']}', style: const TextStyle(fontWeight: FontWeight.w700))),
+          Text('${r['status'] ?? ''}   ', style: TextStyle(fontSize: 11, color: r['open'] == false ? p.loss : p.gain)),
           Text('${r['price_str']}', style: numStyle.copyWith(fontWeight: FontWeight.w600)),
         ]),
         const SizedBox(height: 4),
+        if (r['open'] == false)
+          Text('MARKET CLOSED (WEEKEND): no signals, last close shown', style: TextStyle(color: p.loss, fontWeight: FontWeight.w600, fontSize: 12.5))
+        else
         Row(children: [
           Text('${r['bias']} (${signed(score, 0)})',
               style: TextStyle(color: biasColor(p, score), fontWeight: FontWeight.w600)),
@@ -114,9 +118,11 @@ class _MarketViewState extends State<MarketView> with AutomaticKeepAliveClientMi
           for (final k in ['1h', '4h', '1d'])
             if (tf[k] != null) _tfTag(p, k, (tf[k]['score'] as num).toInt()),
         ]),
-        const SizedBox(height: 4),
-        Text('RSI ${r['rsi'] ?? '-'}   support ${r['support_str']}   resistance ${r['resistance_str']}',
-            style: numStyle.copyWith(color: p.muted, fontSize: 12)),
+        if (r['open'] != false) ...[
+          const SizedBox(height: 4),
+          Text('RSI ${r['rsi'] ?? '-'}   support ${r['support_str']}   resistance ${r['resistance_str']}',
+              style: numStyle.copyWith(color: p.muted, fontSize: 12)),
+        ],
       ]),
     );
   }
@@ -235,7 +241,7 @@ class _NewsViewState extends State<NewsView> with AutomaticKeepAliveClientMixin 
   }
 }
 
-// ------------------------------------------------------------------- setups
+// ----------------------------------------------------------------- screener
 
 class SetupsView extends StatefulWidget {
   const SetupsView({super.key});
@@ -246,11 +252,24 @@ class SetupsView extends StatefulWidget {
 class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMixin {
   String market = 'crypto';
   String style = 'intraday';
+  String view = 'list';
+  String filter = 'all';
   List rows = [];
+  Map<String, dynamic> summary = {};
+  Map<String, dynamic> mstatus = {};
   bool loading = false;
   bool touched = false;
   String? err;
   int req = 0;
+
+  static const filters = {
+    'all': 'All',
+    'open': 'Open',
+    'bullish': 'Bullish',
+    'bearish': 'Bearish',
+    'zone': 'In zone',
+    'ready': 'Ready',
+  };
 
   @override
   bool get wantKeepAlive => true;
@@ -279,12 +298,39 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
       err = null;
     });
     try {
-      final d = await Api.get('/api/setups', {'market': market, 'style': style}) as Map<String, dynamic>;
-      if (mounted && my == req) setState(() => rows = d['setups'] as List);
+      final d = await Api.get('/api/screener', {'market': market, 'style': style}) as Map<String, dynamic>;
+      if (mounted && my == req) {
+        setState(() {
+          rows = d['rows'] as List;
+          summary = (d['summary'] as Map?)?.cast<String, dynamic>() ?? {};
+          mstatus = (d['market_status'] as Map?)?.cast<String, dynamic>() ?? {};
+        });
+      }
     } catch (e) {
       if (mounted && my == req) setState(() => err = '$e');
     }
     if (mounted && my == req) setState(() => loading = false);
+  }
+
+  List get visible {
+    bool keep(Map<String, dynamic> r) {
+      final z = (r['zones'] as Map?) ?? {};
+      switch (filter) {
+        case 'open':
+          return r['open'] == true;
+        case 'bullish':
+          return r['bias'] == 'Bullish';
+        case 'bearish':
+          return r['bias'] == 'Bearish';
+        case 'zone':
+          return z['in_zone'] == true;
+        case 'ready':
+          return r['status'] == 'READY';
+      }
+      return true;
+    }
+
+    return rows.where((r) => keep(r as Map<String, dynamic>)).toList();
   }
 
   Widget _chip(Pal p, String text, Color c) => Container(
@@ -295,9 +341,112 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
       );
 
   Color _statusColor(Pal p, String s) =>
-      s == 'READY' ? p.gain : (s == 'IN ZONE' ? p.warn : (s == 'NEWS HOLD' ? p.loss : p.muted));
+      s == 'READY' ? p.gain : (s == 'IN ZONE' ? p.warn : (s == 'NEWS HOLD' || s == 'MARKET CLOSED' ? p.loss : p.muted));
 
-  Widget _card(Pal p, Map<String, dynamic> r) {
+  Color _biasColor(Pal p, String b) => b == 'Bullish' ? p.gain : (b == 'Bearish' ? p.loss : p.muted);
+
+  String _biasArrow(String b) => b == 'Bullish' ? '\u25B2' : (b == 'Bearish' ? '\u25BC' : '\u2013');
+
+  /// One compact screener row: open/closed, bias, active zones, setup status.
+  Widget _srow(Pal p, Map<String, dynamic> r, int index) {
+    final open = r['open'] == true;
+    final z = (r['zones'] as Map?)?.cast<String, dynamic>() ?? {};
+    final bias = '${r['bias']}';
+    final dir = '${r['direction']}';
+    final vp = r['vp'] as Map<String, dynamic>?;
+    final nearest = z['nearest'];
+    return Panel(
+      child: InkWell(
+        onTap: () => _detail(index),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Expanded(
+              child: Text('${r['name']}  ${r['label']}', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15)),
+            ),
+            Text('${r['price_str']}', style: numStyle.copyWith(color: p.muted)),
+          ]),
+          const SizedBox(height: 6),
+          Wrap(runSpacing: 4, children: [
+            _chip(p, open ? '\u25CF ${r['market_status']}' : '\u25CB ${r['market_status']}', open ? p.gain : p.loss),
+            if (open) _chip(p, '${_biasArrow(bias)} $bias ${(r['bias_pct'] as num) >= 0 ? '+' : ''}${r['bias_pct']}%', _biasColor(p, bias)),
+            if (open) _chip(p, 'Zones ${z['count'] ?? 0}${z['in_zone'] == true ? '  IN ZONE' : ''}', z['in_zone'] == true ? p.warn : p.muted),
+            if (open && dir != 'none') _chip(p, '${dir.toUpperCase()} ${r['status']} ${r['confidence']}', _statusColor(p, '${r['status']}')),
+            if (open && dir == 'none') _chip(p, '${r['status']}', p.muted),
+            if (!open) _chip(p, '${r['status']}', p.muted),
+          ]),
+          if (open && nearest != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text('Nearest: $nearest', style: numStyle.copyWith(color: p.muted, fontSize: 11.5)),
+            ),
+          if (open && vp != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text('Volume ${vp['tf']}: POC ${vp['poc']}  VA ${vp['val']} - ${vp['vah']}  (price ${vp['pos']})',
+                  style: numStyle.copyWith(color: p.muted, fontSize: 11.5)),
+            ),
+          if (!open && r['reopen'] != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text('Reopens ${r['reopen']}. No signals while closed.', style: TextStyle(color: p.muted, fontSize: 12)),
+            ),
+        ]),
+      ),
+    );
+  }
+
+  Widget _banner(Pal p) {
+    if (mstatus.isEmpty) return const SizedBox.shrink();
+    final open = mstatus['open'] == true;
+    final col = open ? p.gain : p.loss;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: p.surface,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: open ? p.outline : col, width: open ? 1 : 1.6),
+      ),
+      child: Row(children: [
+        Icon(open ? Icons.lock_open : Icons.lock_outline, color: col, size: 20),
+        const SizedBox(width: 10),
+        Expanded(child: Text('${mstatus['text']}', style: TextStyle(color: open ? p.muted : col, fontSize: 13, fontWeight: FontWeight.w600))),
+      ]),
+    );
+  }
+
+  Widget _summaryLine(Pal p) {
+    if (summary.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Text(
+        '${summary['open']} open  -  ${summary['bullish']} bullish  -  ${summary['bearish']} bearish  -  '
+        '${summary['in_zone']} in a zone  -  ${summary['ready']} ready',
+        style: TextStyle(color: p.muted, fontSize: 12),
+      ),
+    );
+  }
+
+  Widget _closedCard(Pal p, Map<String, dynamic> r, int index) {
+    final notes = (r['notes'] as List?) ?? [];
+    return Panel(
+      child: InkWell(
+        onTap: () => _detail(index),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Expanded(child: Text('${r['name']}  ${r['label']}', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15.5))),
+            Text('${r['price_str']}', style: numStyle.copyWith(color: p.muted)),
+          ]),
+          const SizedBox(height: 6),
+          _chip(p, '${r['status']}'.toUpperCase(), p.loss),
+          for (final n in notes) Text('$n', style: TextStyle(color: p.muted, fontSize: 12.5, height: 1.4)),
+        ]),
+      ),
+    );
+  }
+
+  Widget _card(Pal p, Map<String, dynamic> r, int index) {
+    if (r['open'] == false) return _closedCard(p, r, index);
     final dir = '${r['direction']}';
     final none = dir == 'none';
     final col = none ? p.muted : (dir == 'long' ? p.gain : p.loss);
@@ -309,7 +458,7 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
     final conflu = ((r['confluence'] as List?) ?? []).join(', ');
     return Panel(
       child: InkWell(
-        onTap: () => _detail(r),
+        onTap: () => _detail(index),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
             Expanded(
@@ -361,7 +510,7 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
           Align(
             alignment: Alignment.centerLeft,
             child: TextButton.icon(
-              onPressed: () => _detail(r, focus: 'xray'),
+              onPressed: () => _detail(index, focus: 'xray'),
               icon: const Icon(Icons.troubleshoot, size: 18),
               label: const Text('Why this score? (Trade X-Ray)'),
             ),
@@ -417,8 +566,9 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
     );
   }
 
-  void _detail(Map<String, dynamic> r, {String focus = ''}) {
+  void _detail(int index, {String focus = ''}) {
     final p = context.pal;
+    final list = visible.map((r) => {'name': '${(r as Map)['name']}', 'label': '${r['label']}'}).toList();
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -426,7 +576,7 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
       builder: (_) => FractionallySizedBox(
         heightFactor: 0.92,
-        child: _DetailSheet(name: '${r['name']}', label: '${r['label']}', style: style, initialFocus: focus),
+        child: _DetailSheet(items: list, start: index, style: style, initialFocus: focus),
       ),
     );
   }
@@ -435,6 +585,7 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
   Widget build(BuildContext context) {
     super.build(context);
     final p = context.pal;
+    final list = visible;
     return RefreshIndicator(
       onRefresh: _load,
       child: ListView(
@@ -451,6 +602,8 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
               setState(() {
                 market = s.first;
                 rows = [];
+                summary = {};
+                mstatus = {};
               });
               _load();
             },
@@ -468,16 +621,33 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
               _load();
             },
           ),
-          const SizedBox(height: 6),
-          Text(
-            style == 'scalp'
-                ? 'Scalp: 1H bias, 15m setup, 5m trigger.'
-                : (style == 'swing' ? 'Swing: weekly bias, daily setup, 4H trigger.' : 'Intraday: 4H bias, 1H setup, 15m trigger.'),
-            style: TextStyle(color: p.muted, fontSize: 12),
+          const SizedBox(height: 8),
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(value: 'list', label: Text('Screener'), icon: Icon(Icons.view_list, size: 18)),
+              ButtonSegment(value: 'cards', label: Text('Detailed cards'), icon: Icon(Icons.view_agenda_outlined, size: 18)),
+            ],
+            selected: {view},
+            onSelectionChanged: (s) => setState(() => view = s.first),
           ),
-          Text('Every style reads MN, 1W, 1D, 4H, 1H, 15m and 5m. Higher timeframes set the bias; 5m refines the entry.',
-              style: TextStyle(color: p.muted, fontSize: 12)),
-          const SizedBox(height: 6),
+          const SizedBox(height: 8),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(children: [
+              for (final e in filters.entries)
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: ChoiceChip(
+                    label: Text(e.value),
+                    selected: filter == e.key,
+                    onSelected: (_) => setState(() => filter = e.key),
+                  ),
+                ),
+            ]),
+          ),
+          const SizedBox(height: 8),
+          _banner(p),
+          _summaryLine(p),
           if (loading) const LinearProgressIndicator(),
           if (err != null)
             Panel(
@@ -491,11 +661,17 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
               padding: const EdgeInsets.all(24),
               child: Text('No data yet. Pull down to refresh.', textAlign: TextAlign.center, style: TextStyle(color: p.muted)),
             ),
-          for (final r in rows) _card(p, r as Map<String, dynamic>),
+          if (rows.isNotEmpty && list.isEmpty)
+            Padding(
+              padding: const EdgeInsets.all(20),
+              child: Text('Nothing matches this filter.', textAlign: TextAlign.center, style: TextStyle(color: p.muted)),
+            ),
+          for (var i = 0; i < list.length; i++)
+            view == 'list' ? _srow(p, list[i] as Map<String, dynamic>, i) : _card(p, list[i] as Map<String, dynamic>, i),
           const SizedBox(height: 8),
           Text(
-            'Tap a card for the full multi-timeframe report. Setups are rule-based ideas built from structure, '
-            'order blocks, FVG, supply and demand, Fibonacci, trendlines and liquidity. Not financial advice.',
+            'Tap an asset for the full multi-timeframe report and use the arrows to move to the next one. '
+            'Rule-based analysis, not financial advice.',
             style: TextStyle(color: p.muted, fontSize: 12, height: 1.4),
           ),
         ],
@@ -505,8 +681,10 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
 }
 
 class _DetailSheet extends StatefulWidget {
-  final String name, label, style, initialFocus;
-  const _DetailSheet({required this.name, required this.label, required this.style, this.initialFocus = ''});
+  final List<Map<String, String>> items;
+  final int start;
+  final String style, initialFocus;
+  const _DetailSheet({required this.items, required this.start, required this.style, this.initialFocus = ''});
   @override
   State<_DetailSheet> createState() => _DetailSheetState();
 }
@@ -524,10 +702,12 @@ class _DetailSheetState extends State<_DetailSheet> {
     'fib': 'Fibonacci',
     'trend': 'Trendlines',
     'liquidity': 'Liquidity',
+    'volume': 'Volume profile',
     'ict': 'ICT',
     'poi': 'POI and setup',
   };
   String focus = '';
+  int idx = 0;
   String? text;
   String? err;
   int req = 0;
@@ -536,6 +716,7 @@ class _DetailSheetState extends State<_DetailSheet> {
   void initState() {
     super.initState();
     focus = widget.initialFocus;
+    idx = widget.start.clamp(0, widget.items.length - 1).toInt();
     _load();
   }
 
@@ -546,12 +727,17 @@ class _DetailSheetState extends State<_DetailSheet> {
       err = null;
     });
     try {
-      final d = await Api.get('/api/analysis', {'name': widget.name, 'style': widget.style, if (focus.isNotEmpty) 'focus': focus})
+      final d = await Api.get('/api/analysis', {'name': widget.items[idx]['name']!, 'style': widget.style, if (focus.isNotEmpty) 'focus': focus})
           as Map<String, dynamic>;
       if (mounted && my == req) setState(() => text = '${d['text']}');
     } catch (e) {
       if (mounted && my == req) setState(() => err = '$e');
     }
+  }
+
+  void _go(int d) {
+    idx = (idx + d).clamp(0, widget.items.length - 1).toInt();
+    _load();
   }
 
   @override
@@ -561,10 +747,16 @@ class _DetailSheetState extends State<_DetailSheet> {
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
+          IconButton(onPressed: idx > 0 ? () => _go(-1) : null, icon: const Icon(Icons.chevron_left)),
           Expanded(
-            child: Text('${widget.name}  ${widget.label}  -  ${styleLabels[widget.style] ?? ''}',
-                style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+            child: Text(
+              '${widget.items[idx]['name']}  ${widget.items[idx]['label']}  -  ${styleLabels[widget.style] ?? ''}   (${idx + 1}/${widget.items.length})',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
+            ),
           ),
+          IconButton(onPressed: idx < widget.items.length - 1 ? () => _go(1) : null, icon: const Icon(Icons.chevron_right)),
           IconButton(onPressed: () => Navigator.of(context).pop(), icon: const Icon(Icons.close)),
         ]),
         SingleChildScrollView(

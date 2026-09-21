@@ -234,7 +234,8 @@ def _kind(m: str) -> str:
 
 @api.get("/scanner")
 async def scanner(m: str = Query("crypto", alias="market")):
-    return engine.public_rows(await engine.scan(_kind(m)))
+    k = _kind(m)
+    return engine.public_rows(await engine.scan(k), k)
 
 
 def _asset(name: str) -> str:
@@ -254,10 +255,16 @@ async def analysis(name: str, style: str | None = None, focus: str | None = None
     n, st = _asset(name), _style(style)
     res = await engine.analyze(n, st)
     label = C.LABELS.get(n, n)
-    f = focus if focus in ("topdown", "structure", "ob", "fvg", "sd", "sr", "fib", "trend", "liquidity", "ict", "poi", "xray") else None
+    f = focus if focus in ("topdown", "structure", "ob", "fvg", "sd", "sr", "fib", "trend", "liquidity", "volume", "ict", "poi", "xray") else None
     text = (await engine.xray_report(n, st)) if f == "xray" else \
         strategy.report_text(res, f"{n} ({label})", f, prefs.get()["analyst"]["modules"])
     return {"summary": strategy.public(res, label), "text": text}
+
+
+@api.get("/screener")
+async def screener(m: str = Query("crypto", alias="market"), style: str | None = None):
+    """One row per asset: open/closed, bias, active zones, setup status and volume profile."""
+    return await engine.screener(_kind(m), _style(style))
 
 
 @api.get("/journal")

@@ -12,6 +12,7 @@ ALIASES = {
     "SOL": ["sol", "solana"], "RENDER": ["render", "rndr"],
     "INJ": ["inj", "injective"], "FET": ["fet", "fetch.ai"],
     "NEAR": ["near protocol"], "AVAX": ["avax", "avalanche"],
+    "OP": ["optimism", "opusdt"], "XRP": ["xrp", "ripple"], "TRX": ["trx", "tron"], "DOGE": ["doge", "dogecoin"],
     "EURUSD": ["eurusd", "eur/usd", "eur usd", "euro"],
     "GBPUSD": ["gbpusd", "gbp/usd", "pound", "sterling", "cable", "gbp"],
     "USDJPY": ["usdjpy", "usd/jpy", "yen", "jpy"],
@@ -62,10 +63,30 @@ async def scan(kind):
     return rows
 
 
-def public_rows(rows):
+def market_status(kind):
+    """Open / closed state of a market. Spot forex and gold are closed from Friday 17:00 to Sunday 17:00 New York."""
+    if kind == "crypto":
+        return {"open": True, "text": "Crypto trades 24/7", "session": "24/7"}
+    ss = strategy.session_info(kind="forex")
+    if ss["closed"]:
+        m = ss.get("reopen_min", 0)
+        return {"open": False, "text": f"Market Closed (Weekend). Reopens {ss['reopen_text']}, in {m // 60} h {m % 60} min.",
+                "session": "Closed", "reopen_min": m}
+    return {"open": True, "text": f"Forex and gold are open. Session: {ss['name']} (New York {ss['ny_time']}).", "session": ss["name"]}
+
+
+def public_rows(rows, kind="crypto"):
     keep = ("name", "label", "price", "price_str", "change_pct", "score", "bias",
             "rsi", "atr_pct", "support_str", "resistance_str", "tf")
-    return [{k: r[k] for k in keep} for r in rows]
+    ms = market_status(kind)
+    out = []
+    for r in rows:
+        d = {k: r[k] for k in keep}
+        d["open"], d["status"] = ms["open"], ("Open 24/7" if kind == "crypto" else ("Open" if ms["open"] else "Closed (Weekend)"))
+        if not ms["open"]:                 # no bias or signals for a closed market
+            d["bias"], d["score"] = "Market Closed", 0
+        out.append(d)
+    return out
 
 
 # --------------------------------------------------------------- text pieces
@@ -409,6 +430,7 @@ def _style_of(ql):
 _FOCUS = [
     ("topdown", r"top[- ]?down|multi[- ]?timeframe|\bmtf\b|alignment"),
     ("poi", r"\bpois?\b|points? of interest"),
+    ("volume", r"volume|\bpoc\b|value area|\bvah\b|\bval\b"),
     ("ob", r"order[- ]?blocks?|\bobs?\b|breaker"),
     ("fvg", r"\bfvgs?\b|fair value|imbalance"),
     ("sd", r"\bsupply\b|\bdemand\b|\bs&d\b|\bsnd\b"),
@@ -567,6 +589,38 @@ async def setups_list(kind, style):
     return rows
 
 
+def _screener_summary(rows):
+    return {"total": len(rows), "open": sum(1 for r in rows if r.get("open")), "closed": sum(1 for r in rows if not r.get("open")),
+            "bullish": sum(1 for r in rows if r.get("bias") == "Bullish"), "bearish": sum(1 for r in rows if r.get("bias") == "Bearish"),
+            "in_zone": sum(1 for r in rows if (r.get("zones") or {}).get("in_zone")),
+            "ready": sum(1 for r in rows if r.get("status") == "READY")}
+
+
+async def screener(kind, style):
+    rows = await setups_list(kind, style)
+    return {"style": style, "market": kind, "market_status": market_status(kind), "summary": _screener_summary(rows), "rows": rows}
+
+
+async def screener_text(kind=None, style=None):
+    style = style if style in strategy.STYLES else _default_style()
+    kinds = [kind] if kind else ["crypto", "forex"]
+    L = [f"SCREENER - {strategy.STYLES[style]['label']} - {_now()}"]
+    for k in kinds:
+        d = await screener(k, style)
+        sm, ms = d["summary"], d["market_status"]
+        L += ["", f"{'CRYPTO' if k == 'crypto' else 'FOREX AND GOLD'}: {ms['text']}",
+              f"{sm['bullish']} bullish, {sm['bearish']} bearish, {sm['in_zone']} in a zone, {sm['ready']} ready"]
+        for r in d["rows"]:
+            if not r.get("open"):
+                L.append(f"{r['name']:<7} {r['market_status'].upper()}")
+                continue
+            z = r["zones"]
+            tail = f" | {r['direction'].upper()} {r['status']} {r['confidence']}" if r["direction"] != "none" else ""
+            L.append(f"{r['name']:<7} {r['bias']:<8} {r['bias_pct']:+d}% | zones {z['count']}{' (in zone)' if z['in_zone'] else ''}{tail}")
+    L += ["", "Ask for details, for example: 'intraday setup BTC' or 'volume profile XRP'.", DISCLAIMER]
+    return "\n".join(L)
+
+
 async def setups_ranking_text(style=None, focus=None):
     style = style if style in strategy.STYLES else _default_style()
     crypto, fx = await asyncio.gather(setups_list("crypto", style), setups_list("forex", style))
@@ -613,6 +667,11 @@ async def crypto_briefing():
 
 
 async def forex_briefing():
+    ms = market_status("forex")
+    if not ms["open"]:
+        return "\n".join([f"FOREX AND GOLD - {_now()}", "", "MARKET CLOSED (WEEKEND)", ms["text"], "",
+                          "No signals or analysis are produced while the market is closed, so nothing stale is shown. "
+                          "Crypto trades 24/7: ask for a crypto briefing.", DISCLAIMER])
     return _insert_block(await _forex_briefing_base(), await _setup_block("forex"))
 
 
@@ -632,6 +691,8 @@ def find_assets(q):
                 break
     if "NEAR" not in found and re.search(r"\bNEAR\b", q):
         found.append("NEAR")
+    if "OP" not in found and re.search(r"\bOP\b", q):       # "op" alone is too common a word: only when written OP
+        found.append("OP")
     return found
 
 
@@ -644,6 +705,12 @@ async def answer(question, history=None):
     ql = q.lower()
     if _has(ql, "calendar", "red folder", "red-folder", "high impact", "high-impact", "economic", "nfp", "cpi", "fomc", "rate decision", "upcoming news"):
         return await calendar_text()
+    if re.search(r"(forex|fx|gold|market|xau).{0,25}(open|closed|hours)|(open|closed).{0,15}(forex|fx|gold|market)|market hours|trading hours|forex hours", ql):
+        ms = market_status("forex")
+        return (f"Forex and gold: {ms['text']}\nCrypto: trades 24/7.\n"
+                "Spot forex and gold are closed from Friday 17:00 to Sunday 17:00 New York time, and no signals are produced while closed.")
+    if _has(ql, "screener", "scanner", "scan all", "scan everything", "scan the market", "scan markets"):
+        return await screener_text("crypto" if _has(ql, "crypto") else ("forex" if _has(ql, "forex", "fx") else None), _style_of(ql))
     assets = find_assets(q)
     if not assets and history and _has(ql, "it", "levels", "support", "resistance", "target", "entry", "why", "stop"):
         for m in reversed(history[:-1]):
@@ -670,7 +737,7 @@ async def answer(question, history=None):
         if assets:
             return await xray_report(assets[0], style)
         return "Which asset? For example: \"Trade X-ray BTC\" or \"Why is gold confidence low?\""
-    ops = _has(ql, "profile", "hier", "halt", "status", "pnl", "balance", "settings")
+    ops = _has(ql, "hier", "halt", "status", "pnl", "balance", "settings") or (_has(ql, "profile") and focus != "volume")
     sw = _has(ql, "setup", "trade idea", "entry", "stop loss", "take profit", "risk reward", "top-down", "top down",
               "strategy", "poi", "zone", "trade plan", "smc", "ict")
     if assets and not ops:

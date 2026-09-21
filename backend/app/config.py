@@ -54,3 +54,11 @@ FEEDS = {
         "https://www.investing.com/rss/news_11.rss",
     ],
 }
+
+
+# --- extra scanner assets (step 10): the bot still only trades what it is configured to trade
+for _n in ("OP", "XRP", "TRX", "DOGE"):
+    if _n not in CRYPTO:
+        CRYPTO.append(_n)
+PAIRS = [_s + "USDT" for _s in CRYPTO]
+LABELS.update({"OP": "Optimism", "XRP": "XRP", "TRX": "Tron", "DOGE": "Dogecoin"})

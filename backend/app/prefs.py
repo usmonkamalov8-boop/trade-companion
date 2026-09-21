@@ -6,7 +6,7 @@ from . import config as C
 FILE = C.BASE / "prefs.json"
 KINDS = ["position", "trade", "command", "service", "warning", "news", "risk", "profile", "system"]
 CURRENCIES = ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD"]
-MODULES = ["structure", "ob", "fvg", "sd", "sr", "fib", "trend", "liquidity", "ict", "poi"]
+MODULES = ["structure", "ob", "fvg", "sd", "sr", "fib", "trend", "liquidity", "volume", "ict", "poi"]
 STYLES = ["scalp", "intraday", "swing"]
 LEADS = [0, 5, 15, 30, 60, 120]
 
