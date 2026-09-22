@@ -8,6 +8,7 @@ import 'screens/chart.dart';
 import 'screens/chat.dart';
 import 'screens/markets.dart';
 import 'screens/settings.dart';
+import 'screens/trade.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -43,12 +44,12 @@ class Shell extends StatefulWidget {
 class _ShellState extends State<Shell> {
   late int i;
   final visited = <int>{};
-  final pages = const <Widget>[Dashboard(), ChartPage(), ChatPage(), MarketsPage(), SettingsPage()];
+  final pages = const <Widget>[Dashboard(), TradePage(), ChartPage(), ChatPage(), MarketsPage(), SettingsPage()];
 
   @override
   void initState() {
     super.initState();
-    i = Api.ready ? 0 : 4; // no token yet: open Settings first
+    i = Api.ready ? 0 : 5; // no token yet: open Settings first
     visited.add(i);
   }
 
@@ -66,6 +67,7 @@ class _ShellState extends State<Shell> {
           }),
           destinations: const [
             NavigationDestination(icon: Icon(Icons.dashboard_outlined), label: 'Bot'),
+            NavigationDestination(icon: Icon(Icons.candlestick_chart_outlined), label: 'Trade'),
             NavigationDestination(icon: Icon(Icons.show_chart), label: 'Chart'),
             NavigationDestination(icon: Icon(Icons.forum_outlined), label: 'Assistant'),
             NavigationDestination(icon: Icon(Icons.public), label: 'Markets'),
