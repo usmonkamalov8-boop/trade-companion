@@ -494,7 +494,7 @@ async def chart_data(name, tf, style=None, n=100):
     tf = tf if tf in strategy.ALL_TFS else "1h"
     n = max(20, min(int(n), 200))
     kind = "crypto" if name in C.CRYPTO else "forex"
-    tfs = await market.tfs(name, kind, [tf])
+    tfs = await market.get_tfs(name, kind, [tf])
     c = tfs.get(tf)
     if not c or len(c["c"]) < 5:
         raise ValueError("no candles for this timeframe")
@@ -655,7 +655,7 @@ async def analyze(name, style):
     if hit and time.time() - hit[0] < 60:
         return hit[1]
     kind = "crypto" if name in C.CRYPTO else "forex"
-    tfs, news, fund = await asyncio.gather(market.tfs(name, kind, list(strategy.ALL_TFS)), _news(),
+    tfs, news, fund = await asyncio.gather(market.get_tfs(name, kind, list(strategy.ALL_TFS)), _news(),
                                            market.funding() if kind == "crypto" else asyncio.sleep(0, {}))
     dec = None if kind == "crypto" else C.FOREX[name][1]
     res = await asyncio.to_thread(strategy.build, name, kind, style, tfs, dec, mods, time.time(), news)
