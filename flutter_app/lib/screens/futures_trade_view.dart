@@ -167,22 +167,22 @@ class FuturesTradeViewState extends State<FuturesTradeView> with SingleTickerPro
     ]);
   }
 
+  // The Paper/Live/Armed badge itself lives on the Trade tab's app bar (tap it there to switch modes); this
+  // bar only shows trading-state flags that matter specifically here (entries stopped, panic, a blocked reason).
   Widget _statusBar(Pal p, Map<String, dynamic> s) {
     final halted = s['halted'] == true;
-    final env = (s['env'] ?? 'paper').toString();
+    final showFlags = halted || s['panic'] == true || s['blocked'] != null;
     return Container(
       padding: const EdgeInsets.fromLTRB(10, 8, 10, 4),
       child: Column(children: [
-        Row(children: [
-          _badge(p, env == 'live' ? 'LIVE' : env.toUpperCase(), env == 'live' ? p.loss : p.muted),
-          const SizedBox(width: 6),
-          if (s['armed'] == true) _badge(p, 'ARMED', p.warn),
-          if (halted) ...[const SizedBox(width: 6), _badge(p, 'ENTRIES STOPPED', p.loss)],
-          if (s['panic'] == true) ...[const SizedBox(width: 6), _badge(p, 'PANIC', p.loss)],
-          const Spacer(),
-          if (s['blocked'] != null) Icon(Icons.error_outline, color: p.loss, size: 18),
-        ]),
-        const SizedBox(height: 6),
+        if (showFlags)
+          Row(children: [
+            if (halted) _badge(p, 'ENTRIES STOPPED', p.loss),
+            if (s['panic'] == true) ...[const SizedBox(width: 6), _badge(p, 'PANIC', p.loss)],
+            const Spacer(),
+            if (s['blocked'] != null) Icon(Icons.error_outline, color: p.loss, size: 18),
+          ]),
+        if (showFlags) const SizedBox(height: 6),
         SizedBox(
           width: double.infinity,
           child: Wrap(spacing: 6, runSpacing: 6, children: [

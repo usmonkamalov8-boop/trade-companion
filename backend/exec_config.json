@@ -1,0 +1,6 @@
+{
+  "futures": {
+    "mode": "auto",
+    "max_positions": 4
+  }
+}

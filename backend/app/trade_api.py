@@ -47,6 +47,16 @@ async def set_config(patch: dict = Body(...)):
     return await _fwd("POST", "/config", json=patch)
 
 
+@router.get("/env/check")
+async def env_check(mode: str = "live", allow_any_ip: bool = False):
+    return await _fwd("GET", "/env/check", params={"mode": mode, "allow_any_ip": allow_any_ip})
+
+
+@router.post("/env")
+async def env_switch(b: dict = Body(...)):
+    return await _fwd("POST", "/env", json=b)
+
+
 @router.get("/arm/check")
 async def arm_check(allow_any_ip: bool = False):
     return await _fwd("GET", "/arm/check", params={"allow_any_ip": allow_any_ip})

@@ -65,6 +65,68 @@ class Runtime:
         except BinanceError as e:
             self.blocked = f"could not read the futures position mode: {e.msg}"
 
+    # ------------------------------------------------------------------ switching paper/live/testnet from the app, without a service restart
+    def _persist_env(self, value):
+        """Write EXEC_ENV into exec.env so a later service restart keeps this choice instead of reverting to the old one."""
+        p = C.BASE / "exec.env"
+        lines, found = [], False
+        if p.exists():
+            for line in p.read_text().splitlines():
+                if line.startswith("EXEC_ENV="):
+                    lines.append(f"EXEC_ENV={value}")
+                    found = True
+                else:
+                    lines.append(line)
+        if not found:
+            lines.append(f"EXEC_ENV={value}")
+        p.write_text("\n".join(lines) + "\n")
+        try:
+            os.chmod(p, 0o600)
+        except OSError:
+            pass
+
+    async def switch_env(self, mode, confirm=False, allow_any_ip=False):
+        """Tear the current client/engines down and rebuild them for a different mode - no systemd restart needed.
+        Going TO live needs confirm=true (the app's warning dialog) and a usable key; if the key check fails the
+        engine is still left in live mode (armed stays false, so no real order can go out) rather than silently
+        reverted, so the error is easy to see and fix. Leaving live always disarms."""
+        mode = (mode or "").lower()
+        if mode not in ("paper", "live", "testnet"):
+            return {"ok": False, "error": "mode must be paper, live or testnet"}
+        if mode == self.env:
+            return {"ok": True, "unchanged": True, "env": self.env, "armed": bool(store.config().get("armed"))}
+        if mode == "live":
+            if not confirm:
+                return {"ok": False, "error": "switching to live needs confirmation (the app's warning dialog sets this)"}
+            if not (env("EXEC_BINANCE_KEY") and env("EXEC_BINANCE_SECRET")):
+                return {"ok": False, "error": "no Binance key in exec.env - run tc_exec.py keys on the VPS first"}
+        async with self.fut.lock:
+            self.stop.set()
+            for t in self.tasks:
+                t.cancel()
+            await asyncio.gather(*self.tasks, return_exceptions=True)
+            await self.client.close()
+            self.stop = asyncio.Event()
+            self.blocked = None
+            old_env, self.env = self.env, mode
+            await self.build()
+            await self.check_mode()
+            self.start_loops()
+        self._persist_env(mode)
+        out = {"ok": True, "env": self.env}
+        if mode == "live":
+            chk = await arm_checks(allow_any_ip)
+            store.save_config({"armed": chk["ok"]})
+            out.update(armed=chk["ok"], problems=chk["problems"], warnings=chk["warnings"])
+        else:
+            store.save_config({"armed": False})
+            out["armed"] = False
+        store.event("warning" if mode == "live" else "info", "env", f"switched from {old_env} to {mode} (armed={out['armed']})")
+        await self.notifier.send(f"<b>Trading engine switched to {mode.upper()}</b>" +
+                                 (" Armed - real orders can now reach your Binance account." if out["armed"] else
+                                  (" Not armed yet: " + "; ".join(out.get("problems", [])) if mode == "live" else "")), retries=2)
+        return out
+
     # ------------------------------------------------------------------ loops
     async def loop(self, name, fn, every):
         while not self.stop.is_set():
@@ -286,6 +348,24 @@ async def disarm():
     store.save_config({"armed": False})
     store.event("info", "arm", "live trading disarmed")
     return {"ok": True}
+
+
+@app.get("/env/check", dependencies=[R])
+async def env_check(mode: str = "live", allow_any_ip: bool = False):
+    """What would happen switching to `mode`, without actually switching - used by the app before showing its warning dialog."""
+    mode = mode.lower()
+    if mode != "live":
+        return {"ok": True}
+    if not (env("EXEC_BINANCE_KEY") and env("EXEC_BINANCE_SECRET")):
+        return {"ok": False, "problems": ["no Binance key in exec.env (run tc_exec.py keys on the VPS first)"], "warnings": []}
+    if RT.env == "live":
+        return dumps(await arm_checks(allow_any_ip))
+    return {"ok": True, "note": "a key is present; its permissions are checked at the moment you actually switch"}
+
+
+@app.post("/env", dependencies=[R])
+async def env_switch(b: dict = Body(...)):
+    return dumps(await RT.switch_env(b.get("mode", ""), bool(b.get("confirm")), bool(b.get("allow_any_ip"))))
 
 
 @app.get("/arm/check", dependencies=[R])
