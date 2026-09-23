@@ -63,40 +63,54 @@ class LocalPrefs extends ChangeNotifier {
   }
 
   Future<void> setChartLayer(String layer, bool v) async {
-    final sp = await SharedPreferences.getInstance();
+    // notifyListeners() fires immediately, before the (possibly slow, occasionally failing on some devices)
+    // SharedPreferences write - matching setToasts/setKind below. Gating the UI update on that write instead
+    // is what made an earlier version of this file's own biometricLock toggle look permanently frozen: if
+    // that write is ever slow to resolve, the switch never visibly moves at all.
     switch (layer) {
       case 'ob':
         chartShowOB = v;
-        await sp.setBool('chart_show_ob', v);
         break;
       case 'fvg':
         chartShowFvg = v;
-        await sp.setBool('chart_show_fvg', v);
         break;
       case 'structure':
         chartShowStructure = v;
-        await sp.setBool('chart_show_structure', v);
         break;
       case 'tested':
         chartShowTested = v;
-        await sp.setBool('chart_show_tested', v);
         break;
     }
     notifyListeners();
+    final sp = await SharedPreferences.getInstance();
+    switch (layer) {
+      case 'ob':
+        await sp.setBool('chart_show_ob', v);
+        break;
+      case 'fvg':
+        await sp.setBool('chart_show_fvg', v);
+        break;
+      case 'structure':
+        await sp.setBool('chart_show_structure', v);
+        break;
+      case 'tested':
+        await sp.setBool('chart_show_tested', v);
+        break;
+    }
   }
 
   Future<void> setBiometricLock(bool v) async {
     biometricLock = v;
+    notifyListeners();
     final sp = await SharedPreferences.getInstance();
     await sp.setBool('biometric_lock', v);
-    notifyListeners();
   }
 
   Future<void> setCustomSymbols(Set<String> v) async {
     customSymbols = v;
+    notifyListeners();
     final sp = await SharedPreferences.getInstance();
     await sp.setStringList('custom_symbols', v.toList());
-    notifyListeners();
   }
 
   Future<void> setToasts(bool v) async {
