@@ -46,29 +46,21 @@ jobs:
           sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/><application android:usesCleartextTraffic="true"#' $M
           sed -i 's#android:label="[^"]*"#android:label="Trade Companion"#' $M
 
-      - name: Use the newest Kotlin plugin
+      - name: Use stable Kotlin plugin
         run: |
           python3 - << 'PY'
-          import re, urllib.request, glob
-          url = "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-gradle-plugin/maven-metadata.xml"
-          xml = urllib.request.urlopen(url, timeout=30).read().decode()
-          vs = re.findall(r"<version>(\d+\.\d+\.\d+)</version>", xml)
-          kv = sorted(vs, key=lambda v: tuple(map(int, v.split("."))))[-1]
+          import glob, re
+          kv = "2.1.0"
           f = (glob.glob("android/settings.gradle.kts") + glob.glob("android/settings.gradle"))[0]
           s = open(f).read()
           pat = re.compile(r'(org\.jetbrains\.kotlin\.android"\)? version ")[^"]+(")')
           if pat.search(s):
               s = pat.sub(lambda m: m.group(1) + kv + m.group(2), s)
-              print("updated existing Kotlin plugin line")
           else:
-              if f.endswith(".kts"):
-                  line = '    id("org.jetbrains.kotlin.android") version "%s" apply false' % kv
-              else:
-                  line = '    id "org.jetbrains.kotlin.android" version "%s" apply false' % kv
-              s, n = re.subn(r"(\n[^\n]*com\.android\.application[^\n]*\n)", lambda m: m.group(1) + line + "\n", s, count=1)
-              print("added Kotlin plugin line" if n else "WARNING: could not add Kotlin plugin line")
+              line = '    id("org.jetbrains.kotlin.android") version "%s" apply false' % kv
+              s = s.replace("plugins {", "plugins {\n" + line)
           open(f, "w").write(s)
-          print("Kotlin", kv, "->", f)
+          print("Pinned Kotlin to", kv, "in", f)
           PY
 
       - name: Build APK
