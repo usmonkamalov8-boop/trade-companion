@@ -1,0 +1,65 @@
+name: Build APK
+
+# Runs on every push to main, and you can start it by hand from your phone:
+# GitHub (browser or app) > your repo > Actions > Build APK > Run workflow.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.2
+          cache: true
+
+      - name: Generate Android scaffold
+        run: flutter create --platforms=android --project-name trade_companion --org dev.tradecompanion .
+
+      - name: Bump Kotlin version (safety net in case the scaffold's default ever lags again)
+        run: |
+          S=android/settings.gradle.kts
+          sed -i -E 's/(org\.jetbrains\.kotlin\.android"\) version ")[^"]+(")/\g<1>2.2.21\g<2>/' $S
+          grep -n "kotlin.android" $S
+
+      - name: Patch manifest (internet access, plain HTTP to your VPS, app name)
+        run: |
+          M=android/app/src/main/AndroidManifest.xml
+          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/><application android:usesCleartextTraffic="true"#' $M
+          sed -i 's#android:label="[^"]*"#android:label="Trade Companion"#' $M
+          grep -n "INTERNET\|usesCleartext\|label" $M
+
+      - run: flutter pub get
+
+      - run: flutter build apk --release
+
+      - name: APK size
+        run: ls -lh build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trade-companion-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Publish release (direct download link)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Trade Companion build ${{ github.run_number }}
+          files: build/app/outputs/flutter-apk/app-release.apk
