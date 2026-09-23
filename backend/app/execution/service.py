@@ -34,14 +34,24 @@ class Runtime:
         self.blocked = None
         self.last = {}                            # loop name -> last successful run
         self.restrictions = None
+        self._info_cache = None                   # (fut_symbols, spot_symbols) for paper mode - fetched once, reused
+                                                   # on every later paper rebuild so switching modes back and forth
+                                                   # never needs another real Binance call after the first time
 
     # ------------------------------------------------------------------ construction
     async def build(self):
         if self.env == "paper":
             from .sim import Sim
-            self.real = Client(env="live")
-            fut = (await self.real.call("fut", "GET", "/fapi/v1/exchangeInfo", signed=False))["symbols"]
-            spot = (await self.real.call("spot", "GET", "/api/v3/exchangeInfo", signed=False))["symbols"]
+            self.real = Client(env="live")  # kept alive: paper_feed() polls real prices through this continuously
+            if self._info_cache is None:
+                try:
+                    fut = (await self.real.call("fut", "GET", "/fapi/v1/exchangeInfo", signed=False))["symbols"]
+                    spot = (await self.real.call("spot", "GET", "/api/v3/exchangeInfo", signed=False))["symbols"]
+                    self._info_cache = (fut, spot)
+                except Exception:
+                    await self.real.close()
+                    raise  # no cached copy to fall back on - switch_env sees this and rolls back cleanly
+            fut, spot = self._info_cache
             bal = env("PAPER_BALANCE", "10000")
             sim = Sim(fut_wallet=bal, spot_usdt=bal)
             sim.load_info(fut, spot)
@@ -86,7 +96,11 @@ class Runtime:
             pass
 
     async def switch_env(self, mode, confirm=False, allow_any_ip=False):
-        """Tear the current client/engines down and rebuild them for a different mode - no systemd restart needed.
+        """Build a fresh client/engines for a different mode and only THEN tear the old ones down and restart
+        the background loops - no systemd restart needed. If building the new one fails for any reason (a
+        network hiccup, Binance rate limiting - the exact thing that bit us once already), the OLD client, its
+        engines and its already-running loops are never touched, so this returns an error rather than leaving
+        the whole service with no working connection at all.
         Going TO live needs confirm=true (the app's warning dialog) and a usable key; if the key check fails the
         engine is still left in live mode (armed stays false, so no real order can go out) rather than silently
         reverted, so the error is easy to see and fix. Leaving live always disarms."""
@@ -101,16 +115,34 @@ class Runtime:
             if not (env("EXEC_BINANCE_KEY") and env("EXEC_BINANCE_SECRET")):
                 return {"ok": False, "error": "no Binance key in exec.env - run tc_exec.py keys on the VPS first"}
         async with self.fut.lock:
+            old_env = self.env
+            old = {"client": self.client, "real": self.real, "notifier": self.notifier, "fut": self.fut, "grid": self.grid}
+            self.env = mode
+            try:
+                await self.build()          # builds fresh self.client/self.real/self.notifier/self.fut/self.grid for `mode`
+                await self.check_mode()
+            except Exception as e:
+                # Roll back completely. self.stop and self.tasks were never touched by this attempt, so the
+                # previous background loops are still running on the restored client - nothing needs restarting.
+                self.env = old_env
+                self.client, self.real, self.notifier, self.fut, self.grid = old["client"], old["real"], old["notifier"], old["fut"], old["grid"]
+                return {"ok": False, "error": f"could not switch to {mode}: {e}. Left running in {old_env}."}
+            # the new client/engines are confirmed working: only now is it safe to retire the old ones
             self.stop.set()
             for t in self.tasks:
                 t.cancel()
             await asyncio.gather(*self.tasks, return_exceptions=True)
-            await self.client.close()
+            try:
+                await old["client"].close()
+            except Exception:
+                pass
+            if old["real"] is not None and old["real"] is not self.real:
+                try:
+                    await old["real"].close()
+                except Exception:
+                    pass
             self.stop = asyncio.Event()
             self.blocked = None
-            old_env, self.env = self.env, mode
-            await self.build()
-            await self.check_mode()
             self.start_loops()
         self._persist_env(mode)
         out = {"ok": True, "env": self.env}
