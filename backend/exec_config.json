@@ -3,5 +3,5 @@
     "mode": "auto",
     "max_positions": 4
   },
-  "armed": false
+  "armed": true
 }

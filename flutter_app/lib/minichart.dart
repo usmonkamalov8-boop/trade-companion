@@ -60,6 +60,16 @@ class _SparkPainter extends CustomPainter {
   bool shouldRepaint(covariant _SparkPainter old) => old.v != v || old.color != color;
 }
 
+/// Which structure layers to draw - shared, persisted state (see LocalPrefs.chartShow*), not per-chart.
+class ChartLayers {
+  final bool ob, fvg, structure;
+  const ChartLayers({this.ob = true, this.fvg = true, this.structure = true});
+  @override
+  bool operator ==(Object other) => other is ChartLayers && other.ob == ob && other.fvg == fvg && other.structure == structure;
+  @override
+  int get hashCode => Object.hash(ob, fvg, structure);
+}
+
 class ChartData {
   final List<List<double>> candles;
   final List<Map<String, dynamic>> zones, levels, events;
@@ -89,7 +99,8 @@ class CandleChart extends StatefulWidget {
   final ChartData data;
   final double height;
   final ValueChanged<int?>? onCross;
-  const CandleChart({super.key, required this.data, this.height = 260, this.onCross});
+  final ChartLayers layers;
+  const CandleChart({super.key, required this.data, this.height = 260, this.onCross, this.layers = const ChartLayers()});
   @override
   State<CandleChart> createState() => _CandleChartState();
 }
@@ -117,7 +128,7 @@ class _CandleChartState extends State<CandleChart> {
         child: SizedBox(
           height: widget.height,
           width: double.infinity,
-          child: CustomPaint(painter: _CandlePainter(widget.data, p, cross)),
+          child: CustomPaint(painter: _CandlePainter(widget.data, p, cross, widget.layers)),
         ),
       );
     });
@@ -129,7 +140,15 @@ class _CandlePainter extends CustomPainter {
   final ChartData d;
   final Pal p;
   final int? cross;
-  _CandlePainter(this.d, this.p, this.cross);
+  final ChartLayers layers;
+  _CandlePainter(this.d, this.p, this.cross, this.layers);
+
+  bool _zoneVisible(Map<String, dynamic> z) {
+    final kind = z['kind'];
+    if (kind == 'ENTRY') return true; // the trade setup itself, not a togglable structure layer
+    if (kind == 'FVG') return layers.fvg;
+    return layers.ob; // OB, and the supply/demand zones the legend groups with it
+  }
 
   void _text(Canvas c, String s, Offset o, Color col, {double size = 9, bool right = false}) {
     final tp = TextPainter(
@@ -177,7 +196,7 @@ class _CandlePainter extends CustomPainter {
     final span0 = hi - lo == 0 ? 1.0 : hi - lo;
     final xlo = lo - span0 * 0.35, xhi = hi + span0 * 0.35;
     // draw everything that sits near the candles; far-away levels would squash the chart
-    final zonesNear = d.zones.where((z) => (z['high'] as num) >= xlo && (z['low'] as num) <= xhi).toList();
+    final zonesNear = d.zones.where((z) => _zoneVisible(z) && (z['high'] as num) >= xlo && (z['low'] as num) <= xhi).toList();
     final levelsNear = d.levels.where((l) => (l['price'] as num) >= xlo && (l['price'] as num) <= xhi).toList();
     for (final z in zonesNear) {
       lo = math.min(lo, (z['low'] as num).toDouble());
@@ -209,9 +228,9 @@ class _CandlePainter extends CustomPainter {
       final bot = y((z['low'] as num).toDouble()).clamp(padT, padT + plotH).toDouble();
       final rect = Rect.fromLTRB(x0, top, plotW, math.max(bot, top + 1.5));
       final entry = z['kind'] == 'ENTRY';
-      canvas.drawRect(rect, Paint()..color = col.withAlpha((((entry ? 0.24 : 0.15)) * 255).round()));
+      canvas.drawRect(rect, Paint()..color = col.withAlpha((((entry ? 0.24 : 0.08)) * 255).round()));
       canvas.drawRect(rect, Paint()
-        ..color = col.withAlpha((((entry ? 0.9 : 0.5)) * 255).round())
+        ..color = col.withAlpha((((entry ? 0.9 : 0.4)) * 255).round())
         ..style = PaintingStyle.stroke
         ..strokeWidth = entry ? 1.2 : 0.7);
       final lab = entry ? 'ENTRY' : '${z['kind']}${z['fresh'] == true ? '' : ' (tested)'}';
@@ -247,7 +266,7 @@ class _CandlePainter extends CustomPainter {
       canvas.drawRect(Rect.fromLTWH(x(i) - w / 2, top, w, math.max(1.0, bot - top)), Paint()..color = col);
     }
 
-    for (final e in d.events) {
+    for (final e in (layers.structure ? d.events : const <Map<String, dynamic>>[])) {
       final i = (e['x'] as num).toInt();
       if (i < 0 || i >= n) continue;
       final dir = (e['dir'] as num).toInt();
@@ -273,15 +292,17 @@ class _CandlePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _CandlePainter old) => old.d != d || old.cross != cross || old.p != p;
+  bool shouldRepaint(covariant _CandlePainter old) => old.d != d || old.cross != cross || old.p != p || old.layers != layers;
 }
 
 /// Loads /api/chart and shows the chart with timeframe and length chips. Used inside the screener rows.
 class MiniChartPanel extends StatefulWidget {
   final String name, style;
   final String initialTf;
+  final String? nearest;      // e.g. "Bull OB 1H 2,721.4 - 2,733.7 (0.5 ATR away)" - shown compactly, only while open
+  final Map<String, dynamic>? vp; // volume-profile summary (tf/poc/val/vah/pos), same idea
   final VoidCallback? onReport, onXray, onCalc;
-  const MiniChartPanel({super.key, required this.name, required this.style, this.initialTf = '1h', this.onReport, this.onXray, this.onCalc});
+  const MiniChartPanel({super.key, required this.name, required this.style, this.initialTf = '1h', this.nearest, this.vp, this.onReport, this.onXray, this.onCalc});
   @override
   State<MiniChartPanel> createState() => _MiniChartPanelState();
 }
@@ -295,12 +316,24 @@ class _MiniChartPanelState extends State<MiniChartPanel> {
   bool loading = false;
   int? cross;
   int req = 0;
+  bool infoOpen = true;
 
   @override
   void initState() {
     super.initState();
     tf = tfs.containsKey(widget.initialTf) ? widget.initialTf : '1h';
+    LocalPrefs.I.addListener(_onPrefs);
     _load();
+  }
+
+  @override
+  void dispose() {
+    LocalPrefs.I.removeListener(_onPrefs);
+    super.dispose();
+  }
+
+  void _onPrefs() {
+    if (mounted) setState(() {}); // a layer toggle changed - no refetch needed, just repaint with the new flags
   }
 
   Future<void> _load() async {
@@ -346,13 +379,61 @@ class _MiniChartPanelState extends State<MiniChartPanel> {
     ]);
   }
 
+  Widget _layerToggles(Pal p) {
+    Widget chip(String label, bool selected, String key) => Padding(
+          padding: const EdgeInsets.only(right: 6),
+          child: FilterChip(
+            label: Text(label),
+            visualDensity: VisualDensity.compact,
+            selected: selected,
+            onSelected: (v) => LocalPrefs.I.setChartLayer(key, v),
+          ),
+        );
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(children: [
+        Padding(padding: const EdgeInsets.only(right: 6), child: Icon(Icons.layers_outlined, size: 16, color: p.muted)),
+        chip('OB', LocalPrefs.I.chartShowOB, 'ob'),
+        chip('FVG', LocalPrefs.I.chartShowFvg, 'fvg'),
+        chip('BOS/CHoCH', LocalPrefs.I.chartShowStructure, 'structure'),
+      ]),
+    );
+  }
+
+  String? _compactInfo() {
+    final parts = <String>[];
+    if (widget.nearest != null) parts.add('Nearest: ${widget.nearest}');
+    final vp = widget.vp;
+    if (vp != null) parts.add('Vol ${vp['tf']}: POC ${vp['poc']}, VA ${vp['val']}-${vp['vah']} (${vp['pos']})');
+    return parts.isEmpty ? null : parts.join('   \u00b7   ');
+  }
+
   @override
   Widget build(BuildContext context) {
     final p = context.pal;
     final d = data;
+    final info = _compactInfo();
     return Padding(
       padding: const EdgeInsets.only(top: 8),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        _layerToggles(p),
+        if (info != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: InkWell(
+              onTap: () => setState(() => infoOpen = !infoOpen),
+              child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Icon(infoOpen ? Icons.expand_less : Icons.expand_more, size: 16, color: p.muted),
+                Expanded(
+                  child: Text(info,
+                      maxLines: infoOpen ? 3 : 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: numStyle.copyWith(color: p.muted, fontSize: 11)),
+                ),
+              ]),
+            ),
+          ),
+        const SizedBox(height: 6),
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: Row(children: [
@@ -393,7 +474,11 @@ class _MiniChartPanelState extends State<MiniChartPanel> {
           if (d.closed)
             Text('Market closed (weekend): the chart shows the last session, no signals.', style: TextStyle(color: p.loss, fontSize: 11.5)),
           const SizedBox(height: 4),
-          CandleChart(data: d, onCross: (i) => setState(() => cross = i)),
+          CandleChart(
+            data: d,
+            onCross: (i) => setState(() => cross = i),
+            layers: ChartLayers(ob: LocalPrefs.I.chartShowOB, fvg: LocalPrefs.I.chartShowFvg, structure: LocalPrefs.I.chartShowStructure),
+          ),
           const SizedBox(height: 6),
           _legend(p),
         ],

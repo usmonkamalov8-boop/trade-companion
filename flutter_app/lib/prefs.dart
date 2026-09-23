@@ -24,9 +24,18 @@ class LocalPrefs extends ChangeNotifier {
   bool toasts = true;
   final Set<String> kinds = {'position', 'trade', 'command', 'service', 'warning', 'news', 'setup'};
 
+  // Chart layer toggles (Markets > Screener chart): persisted locally, shared by every chart the app shows -
+  // stays as set across timeframes, assets, and app restarts until the user changes it again.
+  bool chartShowOB = true;
+  bool chartShowFvg = true;
+  bool chartShowStructure = true;
+
   Future<void> load() async {
     final sp = await SharedPreferences.getInstance();
     toasts = sp.getBool('toasts') ?? true;
+    chartShowOB = sp.getBool('chart_show_ob') ?? true;
+    chartShowFvg = sp.getBool('chart_show_fvg') ?? true;
+    chartShowStructure = sp.getBool('chart_show_structure') ?? true;
     final k = sp.getStringList('toast_kinds');
     if (k != null) {
       kinds
@@ -38,6 +47,25 @@ class LocalPrefs extends ChangeNotifier {
         await sp.setStringList('toast_kinds', kinds.toList());
       }
     }
+  }
+
+  Future<void> setChartLayer(String layer, bool v) async {
+    final sp = await SharedPreferences.getInstance();
+    switch (layer) {
+      case 'ob':
+        chartShowOB = v;
+        await sp.setBool('chart_show_ob', v);
+        break;
+      case 'fvg':
+        chartShowFvg = v;
+        await sp.setBool('chart_show_fvg', v);
+        break;
+      case 'structure':
+        chartShowStructure = v;
+        await sp.setBool('chart_show_structure', v);
+        break;
+    }
+    notifyListeners();
   }
 
   Future<void> setToasts(bool v) async {

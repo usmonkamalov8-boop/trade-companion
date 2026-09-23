@@ -271,7 +271,6 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
   bool touched = false;
   String? err;
   int req = 0;
-  Timer? _clock;
 
   static const filters = {
     'all': 'All',
@@ -289,15 +288,6 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
   void initState() {
     super.initState();
     _boot();
-    _clock = Timer.periodic(const Duration(seconds: 20), (_) {
-      if (mounted) setState(() {}); // just redraws the "last analyzed" labels below - no network call
-    });
-  }
-
-  @override
-  void dispose() {
-    _clock?.cancel();
-    super.dispose();
   }
 
   Future<void> _boot() async {
@@ -405,17 +395,8 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
             if (open && dir == 'none') _chip(p, '${r['status']}', p.muted),
             if (!open) _chip(p, '${r['status']}', p.muted),
           ]),
-          if (open && nearest != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Text('Nearest: $nearest', style: numStyle.copyWith(color: p.muted, fontSize: 11.5)),
-            ),
-          if (open && vp != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: Text('Volume ${vp['tf']}: POC ${vp['poc']}  VA ${vp['val']} - ${vp['vah']}  (price ${vp['pos']})',
-                  style: numStyle.copyWith(color: p.muted, fontSize: 11.5)),
-            ),
+          // Nearest-zone / volume-profile detail now lives inside the expanded chart panel below (compact,
+          // collapsible there) instead of always taking space on every collapsed row.
           if (!open && r['reopen'] != null)
             Padding(
               padding: const EdgeInsets.only(top: 4),
@@ -427,6 +408,8 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
               name: name,
               style: style,
               initialTf: setupTf,
+              nearest: nearest,
+              vp: vp,
               onReport: () => _detail(index),
               onXray: () => _detail(index, focus: 'xray'),
               onCalc: r['calc'] == null ? null : () => showPositionCalc(context, symbol: name, calc: (r['calc'] as Map).cast<String, dynamic>()),
@@ -486,16 +469,6 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
     );
   }
 
-  String _lastAnalyzed(dynamic ts) {
-    if (ts == null) return '';
-    final secs = (DateTime.now().millisecondsSinceEpoch / 1000) - (ts as num);
-    if (secs < 5) return 'Last analyzed just now';
-    if (secs < 60) return 'Last analyzed ${secs.floor()}s ago';
-    if (secs < 3600) return 'Last analyzed ${(secs / 60).floor()}m ago';
-    if (secs < 86400) return 'Last analyzed ${(secs / 3600).floor()}h ago';
-    return 'Last analyzed ${(secs / 86400).floor()}d ago';
-  }
-
   Widget _card(Pal p, Map<String, dynamic> r, int index) {
     if (r['open'] == false) return _closedCard(p, r, index);
     final dir = '${r['direction']}';
@@ -515,11 +488,7 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
             Expanded(
               child: Text('${r['name']}  ${r['label']}', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15.5)),
             ),
-            Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-              Text('${r['price_str']}', style: numStyle.copyWith(color: p.muted)),
-              if (r['ts'] != null)
-                Text(_lastAnalyzed(r['ts']), style: TextStyle(color: p.muted, fontSize: 10.5)),
-            ]),
+            Text('${r['price_str']}', style: numStyle.copyWith(color: p.muted)),
           ]),
           const SizedBox(height: 6),
           Row(children: [
