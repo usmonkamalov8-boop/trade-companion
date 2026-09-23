@@ -86,7 +86,7 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
     } on LocalAuthException catch (e) {
       err = switch (e.code) {
         LocalAuthExceptionCode.noBiometricHardware => null, // no hardware: just let them in
-        LocalAuthExceptionCode.notEnrolled => null, // nothing enrolled: just let them in
+        LocalAuthExceptionCode.noBiometricsEnrolled => null, // nothing enrolled: just let them in
         LocalAuthExceptionCode.temporaryLockout => 'Too many attempts. Try again shortly, or use your device PIN.',
         LocalAuthExceptionCode.biometricLockout => 'Locked out. Use your device PIN/pattern to unlock the phone first.',
         _ => 'Could not authenticate: ${e.code}',
