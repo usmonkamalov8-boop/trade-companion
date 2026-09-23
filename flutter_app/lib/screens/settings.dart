@@ -131,11 +131,19 @@ class _ConnectionPageState extends State<ConnectionPage> {
   Future<void> _test() async {
     await _save();
     try {
-      final s = await Api.get('/api/status');
+      await Api.get('/api/status'); // confirms the Companion API itself answers
+      String extra = '';
+      try {
+        final t = await Api.get('/api/trade/status') as Map<String, dynamic>;
+        extra = ' Trading engine: ${t['env']}${t['armed'] == true ? ' (armed)' : ''}'
+            '${t['halted'] == true ? ', new entries stopped' : ''}.';
+      } catch (_) {
+        extra = ' Trading engine (tcexec) not reachable.';
+      }
       if (mounted) {
         setState(() {
           ok = true;
-          result = 'Connected. Bot service: ${s['service']}. ${s['halted'] == true ? 'Halted.' : 'Running.'}';
+          result = 'Connected.$extra';
         });
       }
     } catch (e) {
@@ -1259,6 +1267,7 @@ class DiagnosticsPage extends StatefulWidget {
 
 class _DiagnosticsPageState extends State<DiagnosticsPage> {
   Map<String, dynamic>? d;
+  Map<String, dynamic>? texec;
   String? err;
   String msg = '';
   bool loading = false;
@@ -1276,7 +1285,16 @@ class _DiagnosticsPageState extends State<DiagnosticsPage> {
     });
     try {
       final r = await Api.get('/api/diagnostics') as Map<String, dynamic>;
-      if (mounted) setState(() => d = r);
+      Map<String, dynamic>? t;
+      try {
+        t = await Api.get('/api/trade/status') as Map<String, dynamic>;
+      } catch (_) {
+        t = null; // tcexec not reachable - shown below as its own row rather than failing the whole page
+      }
+      if (mounted) setState(() {
+        d = r;
+        texec = t;
+      });
     } catch (e) {
       if (mounted) setState(() => err = '$e');
     }
@@ -1331,8 +1349,12 @@ class _DiagnosticsPageState extends State<DiagnosticsPage> {
           const Heading('Server'),
           Panel(
             child: Column(children: [
-              _kv(p, 'Bot service', '${x['service']}', color: x['service'] == 'active' ? p.gain : p.warn),
-              _kv(p, 'Trading', x['halted'] == true ? 'Halted' : 'Running'),
+              if (texec != null) ...[
+                _kv(p, 'Trading engine', '${texec!['env']}', color: texec!['env'] == 'live' ? p.warn : p.muted),
+                _kv(p, 'Armed', texec!['armed'] == true ? 'Yes' : 'No', color: texec!['armed'] == true ? p.warn : p.muted),
+                _kv(p, 'New entries', texec!['halted'] == true ? 'Stopped' : 'Allowed', color: texec!['halted'] == true ? p.loss : p.gain),
+              ] else
+                _kv(p, 'Trading engine', 'not reachable', color: p.loss),
               _kv(p, 'Live feed', EventService.I.connected ? 'Connected' : 'Offline',
                   color: EventService.I.connected ? p.gain : p.loss),
               _kv(p, 'Events logged', '${(x['events'] as Map)['last_id']}'),

@@ -367,6 +367,35 @@ async def resume(b: dict = Body(default={})):
     return dumps(await RT.fut.resume("app", bool(b.get("clear_panic"))))
 
 
+@app.get("/wallet", dependencies=[R])
+async def wallet():
+    """Spot balances (with USDT valuation where a direct pair exists) and the futures account summary,
+    kept separate the way an exchange's own wallet screen does."""
+    spot_bal = await RT.client.s_account()
+    rows = []
+    for asset, bal in spot_bal.items():
+        free, locked = float(bal["free"]), float(bal["locked"])
+        total = free + locked
+        if total <= 1e-12:
+            continue
+        value = total if asset == "USDT" else None
+        if value is None:
+            try:
+                px = float(await RT.client.price("spot", asset + "USDT"))
+                value = total * px
+            except BinanceError:
+                pass
+        rows.append({"asset": asset, "free": free, "locked": locked, "total": total, "value_usdt": value})
+    rows.sort(key=lambda r: -(r["value_usdt"] or 0))
+    try:
+        spot_open_orders = len(await RT.client.s_open_orders())
+    except BinanceError:
+        spot_open_orders = None
+    fut = await RT.fut.account()
+    return dumps({"spot": {"balances": rows, "total_value_usdt": sum((r["value_usdt"] or 0) for r in rows), "open_orders": spot_open_orders},
+                  "futures": {"wallet": fut["wallet"], "available": fut["available"], "equity": fut["equity"], "upnl": fut["upnl"]}})
+
+
 @app.get("/stats", dependencies=[R])
 async def stats():
     f = await RT.fut.stats()

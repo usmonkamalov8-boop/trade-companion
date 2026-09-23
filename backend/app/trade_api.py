@@ -117,6 +117,11 @@ async def resume(b: dict = Body(default={})):
     return await _fwd("POST", "/resume", json=b)
 
 
+@router.get("/wallet")
+async def wallet():
+    return await _fwd("GET", "/wallet")
+
+
 @router.get("/stats")
 async def stats():
     return await _fwd("GET", "/stats")
