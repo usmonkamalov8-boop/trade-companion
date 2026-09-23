@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from . import backtest, bot, digest, econ, engine, events, hypotheses, journal, llm, market, prefs, push, security, strategy, trade_api, tz, watcher, config as C
+from . import backtest, bot, digest, econ, engine, events, hypotheses, journal, llm, market, pin_reset, prefs, push, security, strategy, trade_api, tz, watcher, config as C
 
 
 @asynccontextmanager
@@ -488,3 +488,4 @@ async def chat(b: ChatIn):
 
 app.include_router(api)
 app.include_router(trade_api.router, dependencies=[Depends(auth)])
+app.include_router(pin_reset.router, dependencies=[Depends(auth)])

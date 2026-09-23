@@ -9,6 +9,7 @@ import 'screens/chat.dart';
 import 'screens/markets.dart';
 import 'screens/settings.dart';
 import 'screens/trade.dart';
+import 'pin_gate.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -30,7 +31,7 @@ class App extends StatelessWidget {
           debugShowCheckedModeBanner: false,
           navigatorKey: Toaster.navKey,
           theme: buildTheme(ThemeController.I.pal),
-          home: const AuthGate(child: Shell()),
+          home: const PinGate(child: Shell()),
         ),
       );
 }
