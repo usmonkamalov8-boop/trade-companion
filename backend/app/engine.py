@@ -9,7 +9,7 @@ Everything else (screener, backtest, digest, journal, positions, PnL, status, ca
 since those are precise-data requests where a paraphrase could blur or misstate a number."""
 import asyncio, re, time
 from datetime import datetime, timezone
-from . import analytics as A, backtest, bot, digest, hypotheses, journal, llm, market, prefs, strategy, tz as TZ, config as C
+from . import analytics as A, backtest, bot, digest, events, hypotheses, journal, llm, market, prefs, strategy, tz as TZ, config as C
 
 _scan_cache = {}
 DISCLAIMER = "Rule-based analysis of live data. Not financial advice."
@@ -772,15 +772,20 @@ async def strategy_report(name, style=None, focus=None):
     return text.replace(tail, block + tail) if tail in text else text + block
 
 
+_last_empty_warn = {}  # kind -> last time we logged "every symbol failed", so a broken market doesn't spam events
+
+
 async def setups_list(kind, style):
     names = list(C.CRYPTO) if kind == "crypto" else [n for n in C.FOREX if n != "DXY"]
     sem = asyncio.Semaphore(4)
+    errors = []
 
     async def one(n):
         async with sem:
             try:
                 res = await analyze(n, style)
-            except Exception:
+            except Exception as ex:
+                errors.append(f"{n}: {type(ex).__name__}: {str(ex)[:150]}")
                 return None
         row = strategy.public(res, C.LABELS.get(n, n))
         if row is not None:
@@ -788,6 +793,14 @@ async def setups_list(kind, style):
         return row
 
     rows = [r for r in await asyncio.gather(*[one(n) for n in names]) if r and not r.get("error")]
+    if not rows and errors:
+        # Every symbol failed, not "the market has nothing interesting right now" - these look identical to the
+        # app otherwise (an empty screener), so log it once per 10 min per market instead of guessing later.
+        last = _last_empty_warn.get(kind, 0)
+        if time.time() - last > 600:
+            _last_empty_warn[kind] = time.time()
+            events.add("warning", f"{kind} screener came back empty - every symbol's fetch failed",
+                       f"{len(errors)} failed. Examples: " + "; ".join(errors[:5]), "warning")
     rows.sort(key=lambda r: (0 if r["direction"] != "none" and r.get("poi") else 1, -r["confidence"]))
     return rows
 
