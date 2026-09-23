@@ -59,49 +59,13 @@ async def _closed(sym, old):
 
 
 async def _positions_step():
-    if not (C.BINANCE_KEY and C.BINANCE_SECRET):
-        return
-    try:
-        pos = await bot.positions()
-    except Exception as e:
-        if _last["api_ok"] is not False:
-            events.add("warning", "Binance API problem", str(e)[:200], "error")
-        _last["api_ok"] = False
-        return
-    if _last["api_ok"] is False:
-        events.add("system", "Binance connection restored", "", "success")
-    _last["api_ok"] = True
-
-    cur = {p["symbol"]: p for p in pos}
-    prev = _last["positions"]
-    _last["positions"] = cur
-    if prev is None:          # first successful poll: just remember what is open
-        return
-    for sym, p in cur.items():
-        old = prev.get(sym)
-        if old is None:
-            events.add("position", f"{sym} {p['side']} opened",
-                       f"qty {p['qty']:g} @ {_px(p['entry'])}", "success")
-        elif old["side"] != p["side"]:
-            events.add("position", f"{sym} flipped to {p['side']}",
-                       f"qty {p['qty']:g} @ {_px(p['entry'])}", "info")
-        elif abs(p["qty"] - old["qty"]) > old["qty"] * 0.001:
-            events.add("position", f"{sym} size changed",
-                       f"{old['qty']:g} -> {p['qty']:g} (entry {_px(p['entry'])})", "info")
-    for sym, old in prev.items():
-        if sym not in cur:
-            t = asyncio.create_task(_closed(sym, old))
-            _tasks.add(t)
-            t.add_done_callback(_tasks.discard)
-    for sym, p in cur.items():
-        if p["liq"] > 0 and p["mark"] > 0:
-            dist = abs(p["liq"] - p["mark"]) / p["mark"] * 100
-            if dist < 5 and sym not in _warned:
-                _warned.add(sym)
-                events.add("warning", f"{sym}: close to liquidation",
-                           f"Price is {dist:.1f}% from the liquidation level ({_px(p['liq'])}).", "warning")
-            elif dist > 8:
-                _warned.discard(sym)
+    """Disabled: this used to poll Binance directly every 5s on the OLD bot's own key, on top of whatever
+    tcexec (the execution engine) already polls on its own connection - pure redundant load on the same IP,
+    and part of what drove Binance's 429 ("too many requests"). tcexec now reports positions and
+    open/close/liquidation events on its own schedule (see futures.py's reconcile(), which now also carries
+    the liquidation-proximity warning this used to do here). Kept as a no-op, not deleted, so run()'s loop
+    doesn't need restructuring."""
+    return
 
 
 async def run():

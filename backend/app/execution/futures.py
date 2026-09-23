@@ -18,6 +18,10 @@ def day_key(ts=None):
     return time.strftime("%Y-%m-%d", time.gmtime(ts or time.time()))
 
 
+def fmt_opt(x):
+    return "-" if x is None else fmt(x)
+
+
 def fl(x, nd=6):
     try:
         return round(float(x), nd)
@@ -33,6 +37,7 @@ class Futures:
         self.last_ok = 0.0
         self.unprotected = {}                 # symbol -> first time seen without a stop
         self.alerted = set()
+        self.liq_warned = set()               # symbols currently flagged as close to liquidation (hysteresis, see reconcile)
         self.last_error = None
 
     # ------------------------------------------------------------------ state
@@ -135,7 +140,7 @@ class Futures:
         lines = [f"<b>Trade proposal {esc(pl['symbol'])} {arrow}</b>",
                  f"{'Limit' if pl['entry_type'] == 'LIMIT' else 'Market'} entry {esc(fmt(pl['price']))} (now {esc(fmt(pl['cur_price']))}), size {esc(fmt(pl['qty']))}, "
                  f"value {pl['notional']:.0f} USDT, {pl['leverage']}x {pl['margin_type'].lower()}",
-                 f"Stop {esc(fmt(pl['stop']))}" + (f" ({pl.get('stop_pct', 0):.2f}% away)" if pl.get("stop_pct") else "") + f"   Target {esc(fmt(pl['tp']))}" + (f" ({pl['rr']:.2f}R)" if pl.get("rr") else ""),
+                 f"Stop {esc(fmt_opt(pl['stop']))}" + (f" ({pl.get('stop_pct', 0):.2f}% away)" if pl.get("stop_pct") else "") + f"   Target {esc(fmt_opt(pl['tp']))}" + (f" ({pl['rr']:.2f}R)" if pl.get("rr") else ""),
                  f"Risk if stopped: {pl.get('risk_amount', 0):.2f} USDT ({pl.get('risk_pct', 0):.2f}% of {pl['equity']:.0f})"]
         if pl.get("warnings"):
             lines.append("Note: " + esc("; ".join(pl["warnings"])))
@@ -228,7 +233,7 @@ class Futures:
             avg = float(o["avgPrice"]) if o.get("avgPrice") and float(o["avgPrice"]) > 0 else pl["price"]
             if o.get("status") == "FILLED" or (pl["entry_type"] == "MARKET" and filled > 0):
                 store.x("UPDATE trades SET status='open', entry_avg=? WHERE id=?", (avg, tid))
-                await self.n.send(f"<b>Entered {esc(sym)} {esc(pl['side'])}</b> {esc(fmt(filled))} @ {esc(fmt(avg))} ({pl['leverage']}x)\nStop {esc(fmt(pl['stop']))}  Target {esc(fmt(pl['tp']))}", silent=True)
+                await self.n.send(f"<b>Entered {esc(sym)} {esc(pl['side'])}</b> {esc(fmt(filled))} @ {esc(fmt(avg))} ({pl['leverage']}x)\nStop {esc(fmt_opt(pl['stop']))}  Target {esc(fmt_opt(pl['tp']))}", silent=True)
                 ok, note = await self.protect(tid)
                 return {"ok": True, "trade_id": tid, "status": "open", "protected": ok, "note": note}
             store.x("UPDATE trades SET status='pending_entry' WHERE id=?", (tid,))
@@ -381,6 +386,16 @@ class Futures:
             if self.fail_count == 12:
                 await self.n.send("<b>Exchange unreachable</b> for about a minute. Stops already on the exchange stay active.")
             return
+        for sym, p in pos.items():
+            liq, mark = float(p.get("liquidationPrice") or 0), float(p.get("markPrice") or 0)
+            if liq <= 0 or mark <= 0:
+                continue
+            dist = abs(liq - mark) / mark * 100
+            if dist < 5 and sym not in self.liq_warned:
+                self.liq_warned.add(sym)
+                await self.n.send(f"<b>{esc(sym)}: close to liquidation</b>\nPrice is {dist:.1f}% from the liquidation level ({esc(fmt(liq))}).", retries=2)
+            elif dist > 8:
+                self.liq_warned.discard(sym)
         open_ids = {o["clientOrderId"] for o in orders}
         for t in self._open_trades(("pending_entry", "open")):
             sym = t["symbol"]
