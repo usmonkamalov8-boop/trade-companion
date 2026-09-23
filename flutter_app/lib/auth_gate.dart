@@ -84,16 +84,24 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
         persistAcrossBackgrounding: true,
       );
     } on LocalAuthException catch (e) {
-      err = switch (e.code) {
-        LocalAuthExceptionCode.noBiometricHardware => null, // no hardware: just let them in
-        LocalAuthExceptionCode.noBiometricsEnrolled => null, // nothing enrolled: just let them in
-        LocalAuthExceptionCode.temporaryLockout => 'Too many attempts. Try again shortly, or use your device PIN.',
-        LocalAuthExceptionCode.biometricLockout => 'Locked out. Use your device PIN/pattern to unlock the phone first.',
-        _ => 'Could not authenticate: ${e.code}',
-      };
-      ok = ok || err == null; // no hardware / nothing enrolled -> treat as an unsupported device, not a failure
+      // Only the two "you do have a real lock, you just can't get past it yet" cases stay locked - those
+      // are genuinely worth showing and retrying. Everything else (including uiUnavailable, and anything
+      // this list doesn't name) fails OPEN: this lock is a client-side convenience, not the real security
+      // boundary (that's the API token), so a platform/device quirk we didn't anticipate must never be able
+      // to brick access to someone's own account. See also the manual "Turn off app lock" escape below,
+      // which works even if authenticate() never returns a recognizable result at all.
+      switch (e.code) {
+        case LocalAuthExceptionCode.temporaryLockout:
+          err = 'Too many attempts. Try again shortly, or use your device PIN.';
+          break;
+        case LocalAuthExceptionCode.biometricLockout:
+          err = 'Locked out. Use your device PIN/pattern to unlock the phone first.';
+          break;
+        default:
+          ok = true;
+      }
     } catch (e) {
-      err = 'Could not authenticate: $e';
+      ok = true; // an error type we didn't even expect: same reasoning, fail open rather than lock hard
     }
     if (!mounted) return;
     setState(() {
@@ -101,6 +109,25 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
       _error = err;
       if (ok) _locked = false;
     });
+  }
+
+  Future<void> _disableLock() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Turn off app lock?'),
+        content: const Text('The app will open without authentication from now on, until you turn this back '
+            'on in Settings > Security.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Turn off')),
+        ],
+      ),
+    );
+    if (ok == true) {
+      await LocalPrefs.I.setBiometricLock(false);
+      if (mounted) setState(() => _locked = false);
+    }
   }
 
   @override
@@ -128,6 +155,13 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
                     ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
                     : const Icon(Icons.fingerprint),
                 label: Text(_checking ? 'Checking...' : 'Unlock'),
+              ),
+              const SizedBox(height: 12),
+              TextButton(
+                // Always enabled, even mid-check: this is the guaranteed way out, so it must not depend on
+                // authenticate() ever actually returning.
+                onPressed: _disableLock,
+                child: Text('Trouble unlocking? Turn off app lock', style: TextStyle(color: p.muted, fontSize: 12.5)),
               ),
             ]),
           ),
