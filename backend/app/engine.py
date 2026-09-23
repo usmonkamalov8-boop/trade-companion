@@ -896,6 +896,9 @@ def find_assets(q):
         found.append("NEAR")
     if "OP" not in found and re.search(r"\bOP\b", q):       # "op" alone is too common a word: only when written OP
         found.append("OP")
+    for name in C.CUSTOM_CRYPTO:                             # user-added coins have no entry in ALIASES yet
+        if name not in found and re.search(r"\b" + re.escape(name) + r"\b", q, re.IGNORECASE):
+            found.append(name)
     return found
 
 

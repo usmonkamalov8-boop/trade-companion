@@ -44,6 +44,9 @@ class Api {
       .post(_uri(path), headers: _headers, body: jsonEncode(body ?? {}))
       .timeout(const Duration(seconds: 60)));
 
+  static Future<dynamic> delete(String path) async =>
+      _decode(await http.delete(_uri(path), headers: _headers).timeout(const Duration(seconds: 40)));
+
   static Stream<String> stream(String path,
       {String method = 'GET', Object? body, Map<String, String>? q}) async* {
     final client = http.Client();

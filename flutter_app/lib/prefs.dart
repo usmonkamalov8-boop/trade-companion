@@ -30,12 +30,17 @@ class LocalPrefs extends ChangeNotifier {
   bool chartShowFvg = true;
   bool chartShowStructure = true;
 
+  // User-added coins (Markets > Screener "Add coin"): a local mirror of what the server has confirmed and
+  // persisted, kept in sync on every add/remove so it survives app restarts even without a network call.
+  Set<String> customSymbols = {};
+
   Future<void> load() async {
     final sp = await SharedPreferences.getInstance();
     toasts = sp.getBool('toasts') ?? true;
     chartShowOB = sp.getBool('chart_show_ob') ?? true;
     chartShowFvg = sp.getBool('chart_show_fvg') ?? true;
     chartShowStructure = sp.getBool('chart_show_structure') ?? true;
+    customSymbols = (sp.getStringList('custom_symbols') ?? []).toSet();
     final k = sp.getStringList('toast_kinds');
     if (k != null) {
       kinds
@@ -65,6 +70,13 @@ class LocalPrefs extends ChangeNotifier {
         await sp.setBool('chart_show_structure', v);
         break;
     }
+    notifyListeners();
+  }
+
+  Future<void> setCustomSymbols(Set<String> v) async {
+    customSymbols = v;
+    final sp = await SharedPreferences.getInstance();
+    await sp.setStringList('custom_symbols', v.toList());
     notifyListeners();
   }
 

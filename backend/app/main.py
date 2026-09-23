@@ -313,6 +313,43 @@ async def heatmap(style: str | None = None):
     return await engine.heatmap(_style(style))
 
 
+class CustomSymbolIn(BaseModel):
+    symbol: str
+
+
+@api.get("/symbols/custom")
+async def custom_symbols():
+    """Currently-tracked custom coins (built-in defaults aren't included here - see C.CRYPTO_BASE for those)."""
+    return {"symbols": list(C.CUSTOM_CRYPTO)}
+
+
+@api.post("/symbols/custom")
+async def custom_symbols_add(b: CustomSymbolIn):
+    raw = b.symbol.strip().upper().replace(" ", "")
+    if not raw:
+        raise HTTPException(400, "give a ticker, e.g. SOLUSDT or DOT")
+    base = raw[:-4] if raw.endswith("USDT") else raw
+    if not (base.isalnum() and 1 < len(base) <= 15):
+        raise HTTPException(400, f"'{raw}' doesn't look like a valid ticker")
+    if base in C.CRYPTO:
+        raise HTTPException(409, f"{base} is already tracked")
+    try:
+        await market.validate_futures_pair(base + "USDT")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    C.add_custom_crypto(base)
+    return {"ok": True, "symbol": base, "label": C.LABELS.get(base, base)}
+
+
+@api.delete("/symbols/custom/{symbol}")
+async def custom_symbols_remove(symbol: str):
+    base = symbol.strip().upper()
+    base = base[:-4] if base.endswith("USDT") else base
+    if not C.remove_custom_crypto(base):
+        raise HTTPException(404, f"{base} isn't a custom-added symbol")
+    return {"ok": True}
+
+
 @api.get("/chart")
 async def chart(name: str, tf: str = "1h", n: int = Query(100, ge=20, le=200), style: str | None = None):
     """Candles and the analyst's structure (zones, levels, BOS/CHoCH) for one asset and timeframe."""

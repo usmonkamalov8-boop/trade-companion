@@ -12,7 +12,52 @@ BOT_SERVICE = os.getenv("BOT_SERVICE", "crypto_bot")
 CONTROL_FILE = Path(os.getenv("CONTROL_FILE", str(BASE / "control.json")))
 
 # The 8 pairs the bot trades (Binance USDT-M futures)
-CRYPTO = ["BTC", "ETH", "SOL", "RENDER", "INJ", "FET", "NEAR", "AVAX"]
+CRYPTO_BASE = ["BTC", "ETH", "SOL", "RENDER", "INJ", "FET", "NEAR", "AVAX"]  # the original, always-tracked defaults
+
+CUSTOM_FILE = BASE / "custom_symbols.json"
+
+
+def _load_custom():
+    try:
+        import json
+        v = json.loads(CUSTOM_FILE.read_text())
+        return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
+    except Exception:
+        return []
+
+
+def _save_custom():
+    import json, os
+    tmp = CUSTOM_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(CUSTOM_CRYPTO))
+    os.replace(tmp, CUSTOM_FILE)
+
+
+CUSTOM_CRYPTO = _load_custom()                                    # user-added coins, persisted across restarts
+CRYPTO = CRYPTO_BASE + [c for c in CUSTOM_CRYPTO if c not in CRYPTO_BASE]  # the list everything else already reads
+
+
+def add_custom_crypto(name):
+    """Adds a base asset (e.g. "DOT") to CRYPTO immediately, in-process, and persists it - no restart needed.
+    Returns False if it's already tracked (built-in or previously added)."""
+    name = name.upper()
+    if name in CRYPTO:
+        return False
+    CUSTOM_CRYPTO.append(name)
+    CRYPTO.append(name)
+    _save_custom()
+    return True
+
+
+def remove_custom_crypto(name):
+    """Removes a previously-added custom coin. Built-in defaults can't be removed this way - returns False."""
+    name = name.upper()
+    if name not in CUSTOM_CRYPTO:
+        return False
+    CUSTOM_CRYPTO.remove(name)
+    CRYPTO.remove(name)
+    _save_custom()
+    return True
 PAIRS = [s + "USDT" for s in CRYPTO]
 
 # name -> (Yahoo Finance symbol, price decimals)

@@ -590,6 +590,119 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
     );
   }
 
+  Future<void> _showAddCoinDialog(BuildContext context) async {
+    final ctrl = TextEditingController();
+    String? error;
+    bool busy = false;
+    List<String> custom = LocalPrefs.I.customSymbols.toList()..sort();
+    bool loadedFromServer = false;
+
+    Future<void> refreshFromServer(StateSetter setState) async {
+      try {
+        final r = await Api.get('/api/symbols/custom');
+        final list = (r['symbols'] as List).cast<String>();
+        await LocalPrefs.I.setCustomSymbols(list.toSet());
+        setState(() {
+          custom = list..sort();
+          loadedFromServer = true;
+        });
+      } catch (_) {
+        // keep showing the local mirror if the server can't be reached right now
+      }
+    }
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setState) {
+        if (!loadedFromServer) {
+          loadedFromServer = true; // guard: fire the refresh once, not on every rebuild
+          refreshFromServer(setState);
+        }
+        final p = context.pal;
+        return AlertDialog(
+          title: const Text('Add a coin'),
+          content: SizedBox(
+            width: 340,
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              TextField(
+                controller: ctrl,
+                autofocus: true,
+                textCapitalization: TextCapitalization.characters,
+                decoration: const InputDecoration(hintText: 'e.g. SOLUSDT or DOT', labelText: 'Ticker'),
+                onSubmitted: (_) {},
+              ),
+              if (error != null)
+                Padding(padding: const EdgeInsets.only(top: 6), child: Text(error!, style: TextStyle(color: p.loss, fontSize: 12.5))),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerRight,
+                child: FilledButton(
+                  onPressed: busy
+                      ? null
+                      : () async {
+                          final text = ctrl.text.trim();
+                          if (text.isEmpty) return;
+                          setState(() {
+                            busy = true;
+                            error = null;
+                          });
+                          try {
+                            final r = await Api.post('/api/symbols/custom', {'symbol': text});
+                            final sym = '${r['symbol']}';
+                            final updated = Set<String>.from(LocalPrefs.I.customSymbols)..add(sym);
+                            await LocalPrefs.I.setCustomSymbols(updated);
+                            ctrl.clear();
+                            setState(() {
+                              custom = updated.toList()..sort();
+                              busy = false;
+                            });
+                          } catch (e) {
+                            setState(() {
+                              error = '$e';
+                              busy = false;
+                            });
+                          }
+                        },
+                  child: busy
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Text('Add'),
+                ),
+              ),
+              const Divider(height: 24),
+              Text('Your added coins', style: TextStyle(color: p.muted, fontSize: 12)),
+              const SizedBox(height: 4),
+              if (custom.isEmpty) Text('None yet.', style: TextStyle(color: p.muted, fontSize: 12.5)),
+              for (final c in custom)
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(c),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.close, size: 18),
+                    tooltip: 'Remove',
+                    onPressed: () async {
+                      try {
+                        await Api.delete('/api/symbols/custom/$c');
+                        final updated = Set<String>.from(LocalPrefs.I.customSymbols)..remove(c);
+                        await LocalPrefs.I.setCustomSymbols(updated);
+                        setState(() => custom = updated.toList()..sort());
+                      } catch (e) {
+                        setState(() => error = '$e');
+                      }
+                    },
+                  ),
+                ),
+            ]),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Done')),
+          ],
+        );
+      }),
+    );
+    _load(); // whatever changed, refresh the screener so it reflects the current tracked list
+  }
+
   void _detail(int index, {String focus = ''}) {
     final list = visible.map((r) => {'name': '${(r as Map)['name']}', 'label': '${r['label']}'}).toList();
     showAnalysisSheet(context, list, index, style, focus: focus);
@@ -622,6 +735,17 @@ class _SetupsViewState extends State<SetupsView> with AutomaticKeepAliveClientMi
               _load();
             },
           ),
+          if (market == 'crypto') ...[
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton.icon(
+                onPressed: () => _showAddCoinDialog(context),
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('Add coin'),
+              ),
+            ),
+          ],
           const SizedBox(height: 8),
           SegmentedButton<String>(
             segments: [for (final e in styleLabels.entries) ButtonSegment(value: e.key, label: Text(e.value))],
