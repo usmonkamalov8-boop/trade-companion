@@ -5,7 +5,6 @@ import '../api.dart';
 import '../calc.dart';
 import '../events.dart';
 import '../prefs.dart';
-import '../screen_guard.dart';
 import '../theme.dart';
 
 const moduleLabels = {
@@ -83,7 +82,7 @@ class SettingsPage extends StatelessWidget {
             _tile(context, Icons.monitor_heart_outlined, 'Diagnostics', 'Server, live feed, push and calendar status',
                 const DiagnosticsPage()),
             _tile(context, Icons.security_outlined, 'Security',
-                'App lock ${LocalPrefs.I.biometricLock ? 'on' : 'off'}, screenshot protection ${LocalPrefs.I.screenProtection ? 'on' : 'off'}',
+                'App lock ${LocalPrefs.I.biometricLock ? 'on' : 'off'}',
                 const SecurityPage()),
             Panel(
               padding: EdgeInsets.zero,
@@ -298,30 +297,6 @@ class SecurityPage extends StatelessWidget {
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
                   child: Text(
                     'If this phone has no fingerprint/face unlock or PIN set up at all, the app opens normally either way - it never locks you out of your own account.',
-                    style: TextStyle(color: p.muted, fontSize: 11.5),
-                  ),
-                ),
-              ]),
-            ),
-            const Heading('Screenshots & screen recording'),
-            Panel(
-              padding: const EdgeInsets.symmetric(vertical: 4),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                SwitchListTile(
-                  title: const Text('Block screenshots and screen recording'),
-                  subtitle: Text('On Android this is a hard OS-level block, including in the recent-apps preview.',
-                      style: TextStyle(color: p.muted, fontSize: 12.5)),
-                  value: lp.screenProtection,
-                  onChanged: (v) {
-                    lp.setScreenProtection(v);
-                    ScreenGuard.apply(v);
-                  },
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-                  child: Text(
-                    'iOS gives apps no way to fully block the screenshot gesture - no app can. On iOS this instead blanks out '
-                    'captured screenshots and hides the screen in the app switcher and during screen recording.',
                     style: TextStyle(color: p.muted, fontSize: 11.5),
                   ),
                 ),

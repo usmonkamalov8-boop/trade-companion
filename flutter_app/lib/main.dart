@@ -3,7 +3,6 @@ import 'api.dart';
 import 'auth_gate.dart';
 import 'events.dart';
 import 'prefs.dart';
-import 'screen_guard.dart';
 import 'theme.dart';
 import 'screens/chart.dart';
 import 'screens/chat.dart';
@@ -16,7 +15,6 @@ void main() async {
   await Api.load();
   await ThemeController.I.load();
   await LocalPrefs.I.load();
-  await ScreenGuard.apply(LocalPrefs.I.screenProtection);
   EventService.I.restart(); // starts the live event feed (waits until a token is set)
   ServerPrefs.I.load();
   runApp(const App());

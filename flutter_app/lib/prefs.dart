@@ -36,10 +36,9 @@ class LocalPrefs extends ChangeNotifier {
   // persisted, kept in sync on every add/remove so it survives app restarts even without a network call.
   Set<String> customSymbols = {};
 
-  // Security (Settings > Security): both default on. biometricLock gets out of the way on its own if the
-  // device has no usable authentication at all - see AuthGate.
+  // Security (Settings > Security): defaults on. Gets out of the way on its own if the device has no usable
+  // authentication at all - see AuthGate.
   bool biometricLock = true;
-  bool screenProtection = true;
 
   Future<void> load() async {
     final sp = await SharedPreferences.getInstance();
@@ -50,7 +49,6 @@ class LocalPrefs extends ChangeNotifier {
     chartShowTested = sp.getBool('chart_show_tested') ?? true;
     customSymbols = (sp.getStringList('custom_symbols') ?? []).toSet();
     biometricLock = sp.getBool('biometric_lock') ?? true;
-    screenProtection = sp.getBool('screen_protection') ?? true;
     final k = sp.getStringList('toast_kinds');
     if (k != null) {
       kinds
@@ -91,13 +89,6 @@ class LocalPrefs extends ChangeNotifier {
     biometricLock = v;
     final sp = await SharedPreferences.getInstance();
     await sp.setBool('biometric_lock', v);
-    notifyListeners();
-  }
-
-  Future<void> setScreenProtection(bool v) async {
-    screenProtection = v;
-    final sp = await SharedPreferences.getInstance();
-    await sp.setBool('screen_protection', v);
     notifyListeners();
   }
 
