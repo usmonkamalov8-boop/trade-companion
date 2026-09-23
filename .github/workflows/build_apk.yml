@@ -33,6 +33,13 @@ jobs:
       - name: Generate Android project
         run: flutter create --platforms=android --project-name trade_companion --org dev.tradecompanion .
 
+      - name: Use FlutterFragmentActivity (required for local_auth's biometric prompt)
+        run: |
+          MAINACT=$(find android/app/src/main/kotlin -iname "MainActivity.kt")
+          echo "Patching: $MAINACT"
+          sed -i 's/io\.flutter\.embedding\.android\.FlutterActivity/io.flutter.embedding.android.FlutterFragmentActivity/;s/: FlutterActivity/: FlutterFragmentActivity/' "$MAINACT"
+          cat "$MAINACT"
+
       - name: Patch manifest (internet, plain HTTP, app name)
         run: |
           M=android/app/src/main/AndroidManifest.xml
