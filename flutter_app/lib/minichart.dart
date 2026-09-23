@@ -62,12 +62,13 @@ class _SparkPainter extends CustomPainter {
 
 /// Which structure layers to draw - shared, persisted state (see LocalPrefs.chartShow*), not per-chart.
 class ChartLayers {
-  final bool ob, fvg, structure;
-  const ChartLayers({this.ob = true, this.fvg = true, this.structure = true});
+  final bool ob, fvg, structure, tested;
+  const ChartLayers({this.ob = true, this.fvg = true, this.structure = true, this.tested = true});
   @override
-  bool operator ==(Object other) => other is ChartLayers && other.ob == ob && other.fvg == fvg && other.structure == structure;
+  bool operator ==(Object other) =>
+      other is ChartLayers && other.ob == ob && other.fvg == fvg && other.structure == structure && other.tested == tested;
   @override
-  int get hashCode => Object.hash(ob, fvg, structure);
+  int get hashCode => Object.hash(ob, fvg, structure, tested);
 }
 
 class ChartData {
@@ -233,7 +234,7 @@ class _CandlePainter extends CustomPainter {
         ..color = col.withAlpha((((entry ? 0.9 : 0.4)) * 255).round())
         ..style = PaintingStyle.stroke
         ..strokeWidth = entry ? 1.2 : 0.7);
-      final lab = entry ? 'ENTRY' : '${z['kind']}${z['fresh'] == true ? '' : ' (tested)'}';
+      final lab = entry ? 'ENTRY' : '${z['kind']}${(z['fresh'] == true || !layers.tested) ? '' : ' (tested)'}';
       _text(canvas, lab, Offset(x0 + 3, top + 1), col.withAlpha((((0.95)) * 255).round()), size: 8.5);
     }
 
@@ -396,6 +397,7 @@ class _MiniChartPanelState extends State<MiniChartPanel> {
         chip('OB', LocalPrefs.I.chartShowOB, 'ob'),
         chip('FVG', LocalPrefs.I.chartShowFvg, 'fvg'),
         chip('BOS/CHoCH', LocalPrefs.I.chartShowStructure, 'structure'),
+        chip('Tested', LocalPrefs.I.chartShowTested, 'tested'),
       ]),
     );
   }
@@ -477,7 +479,12 @@ class _MiniChartPanelState extends State<MiniChartPanel> {
           CandleChart(
             data: d,
             onCross: (i) => setState(() => cross = i),
-            layers: ChartLayers(ob: LocalPrefs.I.chartShowOB, fvg: LocalPrefs.I.chartShowFvg, structure: LocalPrefs.I.chartShowStructure),
+            layers: ChartLayers(
+              ob: LocalPrefs.I.chartShowOB,
+              fvg: LocalPrefs.I.chartShowFvg,
+              structure: LocalPrefs.I.chartShowStructure,
+              tested: LocalPrefs.I.chartShowTested,
+            ),
           ),
           const SizedBox(height: 6),
           _legend(p),

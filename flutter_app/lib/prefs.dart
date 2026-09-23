@@ -30,9 +30,16 @@ class LocalPrefs extends ChangeNotifier {
   bool chartShowFvg = true;
   bool chartShowStructure = true;
 
+  bool chartShowTested = true;
+
   // User-added coins (Markets > Screener "Add coin"): a local mirror of what the server has confirmed and
   // persisted, kept in sync on every add/remove so it survives app restarts even without a network call.
   Set<String> customSymbols = {};
+
+  // Security (Settings > Security): both default on. biometricLock gets out of the way on its own if the
+  // device has no usable authentication at all - see AuthGate.
+  bool biometricLock = true;
+  bool screenProtection = true;
 
   Future<void> load() async {
     final sp = await SharedPreferences.getInstance();
@@ -40,7 +47,10 @@ class LocalPrefs extends ChangeNotifier {
     chartShowOB = sp.getBool('chart_show_ob') ?? true;
     chartShowFvg = sp.getBool('chart_show_fvg') ?? true;
     chartShowStructure = sp.getBool('chart_show_structure') ?? true;
+    chartShowTested = sp.getBool('chart_show_tested') ?? true;
     customSymbols = (sp.getStringList('custom_symbols') ?? []).toSet();
+    biometricLock = sp.getBool('biometric_lock') ?? true;
+    screenProtection = sp.getBool('screen_protection') ?? true;
     final k = sp.getStringList('toast_kinds');
     if (k != null) {
       kinds
@@ -69,7 +79,25 @@ class LocalPrefs extends ChangeNotifier {
         chartShowStructure = v;
         await sp.setBool('chart_show_structure', v);
         break;
+      case 'tested':
+        chartShowTested = v;
+        await sp.setBool('chart_show_tested', v);
+        break;
     }
+    notifyListeners();
+  }
+
+  Future<void> setBiometricLock(bool v) async {
+    biometricLock = v;
+    final sp = await SharedPreferences.getInstance();
+    await sp.setBool('biometric_lock', v);
+    notifyListeners();
+  }
+
+  Future<void> setScreenProtection(bool v) async {
+    screenProtection = v;
+    final sp = await SharedPreferences.getInstance();
+    await sp.setBool('screen_protection', v);
     notifyListeners();
   }
 
