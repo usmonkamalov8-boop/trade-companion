@@ -3,8 +3,8 @@ briefings and answers chat questions.
 
 All the numbers here (price, RSI, BOS/CHoCH, PnL, ...) come from the rule-based analysis in this file - no LLM
 is involved in computing any of them, ever. For a handful of open-ended/opinion questions (see _natural below),
-the finished report text is optionally handed to Claude (llm.py) purely to phrase it as a natural reply; if no
-ANTHROPIC_API_KEY is set, or the call fails for any reason, the plain report text is returned unchanged.
+the finished report text is optionally handed to Gemini (llm.py) purely to phrase it as a natural reply; if no
+GEMINI_API_KEY is set, or the call fails for any reason, the plain report text is returned unchanged.
 Everything else (screener, backtest, digest, journal, positions, PnL, status, calendar) always stays literal,
 since those are precise-data requests where a paraphrase could blur or misstate a number."""
 import asyncio, re, time

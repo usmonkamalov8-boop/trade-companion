@@ -1,6 +1,10 @@
 // Biometric (or device PIN/pattern) lock: required on launch and whenever the app returns from the
-// background, when enabled in Settings. If the device has no usable authentication at all, the gate
-// gets out of the way entirely rather than locking the person out of their own app.
+// background, when enabled in Settings. There is deliberately no separate "can this device even do this"
+// pre-check anymore - an earlier version had one (canCheckBiometrics / isDeviceSupported), and it silently
+// unlocked the app before a real authentication attempt was ever made on some devices, defeating the whole
+// feature. The actual authenticate() call is now the only source of truth: if it reports the device genuinely
+// has nothing configured, this unlocks; for anything else, it stays locked and the person can always tap
+// "Turn off app lock" below - that never depends on authenticate() succeeding or even returning at all.
 import 'package:flutter/material.dart';
 import 'package:local_auth/local_auth.dart';
 import 'prefs.dart';
@@ -15,18 +19,19 @@ class AuthGate extends StatefulWidget {
 
 class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
   final _auth = LocalAuthentication();
-  // Starts locked synchronously (no first-frame flash of real content) whenever the setting is on - the async
-  // capability check below can only ever relax this to unlocked, never the other way round.
+  // Starts locked synchronously (no first-frame flash of real content) whenever the setting is on.
   late bool _locked = LocalPrefs.I.biometricLock;
   bool _checking = false;
-  bool _bootChecked = false;
   String? _error;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _onForeground();
+    // Wait for the first frame before showing a native biometric prompt: asking too early, before the
+    // Activity/window is fully attached, is a real, documented cause of a "UI unavailable" failure on
+    // Android - this is what most likely caused the uiUnavailable error seen previously.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _onForeground());
   }
 
   @override
@@ -52,21 +57,8 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
       if (_locked) setState(() => _locked = false);
       return;
     }
-    if (!_bootChecked) {
-      // Cold start: drop the lock only if the device turns out to have no usable authentication at all -
-      // an app with no usable lock screen should never become permanently unreachable. _locked is already
-      // true from the field initializer above, so there is nothing to flash before this check finishes.
-      _bootChecked = true;
-      var can = false;
-      try {
-        can = await _auth.canCheckBiometrics || await _auth.isDeviceSupported();
-      } catch (_) {}
-      if (!can) {
-        if (mounted) setState(() => _locked = false);
-        return;
-      }
-    }
-    if (_locked) await _tryAuth();
+    if (!_locked && mounted) setState(() => _locked = true);
+    await _tryAuth();
   }
 
   Future<void> _tryAuth() async {
@@ -80,17 +72,17 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
     try {
       ok = await _auth.authenticate(
         localizedReason: 'Unlock Trade Companion',
-        biometricOnly: false, // allow device PIN/pattern as a fallback - never a hard biometric-only lockout
+        biometricOnly: false, // allow device PIN/pattern as a fallback
         persistAcrossBackgrounding: true,
       );
     } on LocalAuthException catch (e) {
-      // Only the two "you do have a real lock, you just can't get past it yet" cases stay locked - those
-      // are genuinely worth showing and retrying. Everything else (including uiUnavailable, and anything
-      // this list doesn't name) fails OPEN: this lock is a client-side convenience, not the real security
-      // boundary (that's the API token), so a platform/device quirk we didn't anticipate must never be able
-      // to brick access to someone's own account. See also the manual "Turn off app lock" escape below,
-      // which works even if authenticate() never returns a recognizable result at all.
       switch (e.code) {
+        case LocalAuthExceptionCode.noBiometricHardware:
+        case LocalAuthExceptionCode.noBiometricsEnrolled:
+          // The device genuinely has nothing set up (no fingerprint/Face ID/PIN at all) - the only case
+          // that unlocks automatically, matching what Settings already tells you about this toggle.
+          ok = true;
+          break;
         case LocalAuthExceptionCode.temporaryLockout:
           err = 'Too many attempts. Try again shortly, or use your device PIN.';
           break;
@@ -98,10 +90,12 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
           err = 'Locked out. Use your device PIN/pattern to unlock the phone first.';
           break;
         default:
-          ok = true;
+          // Anything else, including uiUnavailable: stay locked and show why, rather than silently letting
+          // anyone in - the "Turn off app lock" button is the deliberate, visible way out, not this.
+          err = 'Could not authenticate (${e.code}). Try again, or turn off app lock below.';
       }
     } catch (e) {
-      ok = true; // an error type we didn't even expect: same reasoning, fail open rather than lock hard
+      err = 'Could not authenticate: $e';
     }
     if (!mounted) return;
     setState(() {
@@ -158,8 +152,6 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
               ),
               const SizedBox(height: 12),
               TextButton(
-                // Always enabled, even mid-check: this is the guaranteed way out, so it must not depend on
-                // authenticate() ever actually returning.
                 onPressed: _disableLock,
                 child: Text('Trouble unlocking? Turn off app lock', style: TextStyle(color: p.muted, fontSize: 12.5)),
               ),
