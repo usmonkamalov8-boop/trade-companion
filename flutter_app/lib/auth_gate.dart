@@ -76,23 +76,25 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
         persistAcrossBackgrounding: true,
       );
     } on LocalAuthException catch (e) {
-      switch (e.code) {
-        case LocalAuthExceptionCode.noBiometricHardware:
-        case LocalAuthExceptionCode.noBiometricsEnrolled:
-          // The device genuinely has nothing set up (no fingerprint/Face ID/PIN at all) - the only case
-          // that unlocks automatically, matching what Settings already tells you about this toggle.
-          ok = true;
-          break;
-        case LocalAuthExceptionCode.temporaryLockout:
-          err = 'Too many attempts. Try again shortly, or use your device PIN.';
-          break;
-        case LocalAuthExceptionCode.biometricLockout:
-          err = 'Locked out. Use your device PIN/pattern to unlock the phone first.';
-          break;
-        default:
-          // Anything else, including uiUnavailable: stay locked and show why, rather than silently letting
-          // anyone in - the "Turn off app lock" button is the deliberate, visible way out, not this.
-          err = 'Could not authenticate (${e.code}). Try again, or turn off app lock below.';
+      // Matched by the error code's NAME (a string every Dart enum value has built in) rather than an
+      // exact enum member reference: local_auth's exact member spelling has changed under us before and
+      // cost two build failures, and this can't fail to compile even if a future version renames one.
+      final name = e.code.name.toLowerCase();
+      final nothingConfigured = (name.contains('hardware') && !name.contains('temp')) ||
+          name.contains('enroll') || name.contains('credential') || name.contains('passcode');
+      if (nothingConfigured) {
+        // Genuinely nothing to authenticate against on this device - no biometric hardware, nothing
+        // enrolled, or (the case that was actually hit here) no device PIN/pattern/password set up at
+        // all. local_auth cannot create a PIN for this app; it only checks the device's own existing
+        // one. This is the only case that unlocks automatically, matching what Settings already
+        // promises about this toggle.
+        ok = true;
+      } else if (name.contains('lockout')) {
+        err = 'Too many attempts, or your device is temporarily locked. Try again shortly, or use your device PIN.';
+      } else {
+        // Anything else, including uiUnavailable: stay locked and show why, rather than silently letting
+        // anyone in - the "Turn off app lock" button is the deliberate, visible way out, not this.
+        err = 'Could not authenticate (${e.code}). Try again, or turn off app lock below.';
       }
     } catch (e) {
       err = 'Could not authenticate: $e';

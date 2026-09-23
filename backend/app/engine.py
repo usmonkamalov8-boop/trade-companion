@@ -931,6 +931,20 @@ async def _natural(text, question, history=None):
     return rewritten or text
 
 
+async def _chat_fallback(question, history=None):
+    """Nothing in answer() below matched a specific command - this used to always be the static HELP text.
+    If an LLM is configured, it now replies naturally instead, grounded only in what the app can actually do
+    (there's no real trading data to give it here, since no command matched). Falls back to HELP on any
+    failure, exactly like _natural() does for the data-grounded branches."""
+    if not llm.available():
+        return HELP
+    try:
+        reply = await llm.chat(question, history)
+    except Exception:
+        reply = None
+    return reply or HELP
+
+
 async def answer(question, history=None):
     q = question.strip()
     ql = q.lower()
@@ -1015,7 +1029,7 @@ async def answer(question, history=None):
         return await _natural(await ranking_text(), question, history)
     if _has(ql, "crypto", "market", "overview", "brief", "summary", "today", "now", "outlook", "altcoin"):
         return await _natural(await crypto_briefing(), question, history)
-    return HELP
+    return await _chat_fallback(question, history)
 
 
 async def typewriter(text, size=36, delay=0.012):
