@@ -443,6 +443,27 @@ class GridEngine:
                 "daily_profit": [{"day": k, "profit": v} for k, v in sorted(daily.items())], "open_orders": orders, "last_cycles": cyc[-20:][::-1],
                 "errors": st.get("errors", 0), "last_error": st.get("last_error"), "stop_reason": st.get("stop_reason")}
 
+    def stats(self, limit=50):
+        """Aggregate performance across every grid: total cycle profit, per-symbol breakdown, recent cycles."""
+        grids_rows = store.q("SELECT id, symbol, status, invest FROM grids")
+        gid_symbol = {r["id"]: r["symbol"] for r in grids_rows}
+        all_cycles = store.q("SELECT gid, profit, fees FROM grid_cycles")
+        cycles = store.q("SELECT * FROM grid_cycles ORDER BY id DESC LIMIT ?", (limit,))
+        by_symbol = {}
+        for c in all_cycles:
+            sym = gid_symbol.get(c["gid"], "?")
+            d = by_symbol.setdefault(sym, {"cycles": 0, "profit": 0.0, "fees": 0.0})
+            d["cycles"] += 1
+            d["profit"] += c["profit"] or 0
+            d["fees"] += c["fees"] or 0
+        by_symbol_list = [{"symbol": s, **d} for s, d in sorted(by_symbol.items(), key=lambda kv: -kv[1]["profit"])]
+        history = [{"gid": c["gid"], "symbol": gid_symbol.get(c["gid"], "?"), "level": c["level"], "buy_price": c["buy_price"],
+                    "sell_price": c["sell_price"], "qty": c["qty"], "profit": c["profit"], "fees": c["fees"], "ts": c["ts"]} for c in cycles]
+        return {"running": sum(1 for r in grids_rows if r["status"] == "running"),
+                "stopped": sum(1 for r in grids_rows if r["status"] in ("stopped", "failed")),
+                "total_cycles": len(all_cycles), "total_profit": sum((c["profit"] or 0) for c in all_cycles),
+                "total_fees": sum((c["fees"] or 0) for c in all_cycles), "by_symbol": by_symbol_list, "history": history}
+
     def summary(self):
         out = []
         for g in store.q("SELECT * FROM grids ORDER BY ts DESC LIMIT 30"):

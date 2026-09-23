@@ -1,8 +1,15 @@
 """Rule-based 'AI' assistant: turns live data + indicators into plain-language
-briefings and answers chat questions. No paid API, no LLM, no keys."""
+briefings and answers chat questions.
+
+All the numbers here (price, RSI, BOS/CHoCH, PnL, ...) come from the rule-based analysis in this file - no LLM
+is involved in computing any of them, ever. For a handful of open-ended/opinion questions (see _natural below),
+the finished report text is optionally handed to Claude (llm.py) purely to phrase it as a natural reply; if no
+ANTHROPIC_API_KEY is set, or the call fails for any reason, the plain report text is returned unchanged.
+Everything else (screener, backtest, digest, journal, positions, PnL, status, calendar) always stays literal,
+since those are precise-data requests where a paraphrase could blur or misstate a number."""
 import asyncio, re, time
 from datetime import datetime, timezone
-from . import analytics as A, backtest, bot, digest, hypotheses, journal, market, prefs, strategy, tz as TZ, config as C
+from . import analytics as A, backtest, bot, digest, hypotheses, journal, llm, market, prefs, strategy, tz as TZ, config as C
 
 _scan_cache = {}
 DISCLAIMER = "Rule-based analysis of live data. Not financial advice."
@@ -775,7 +782,10 @@ async def setups_list(kind, style):
                 res = await analyze(n, style)
             except Exception:
                 return None
-        return strategy.public(res, C.LABELS.get(n, n))
+        row = strategy.public(res, C.LABELS.get(n, n))
+        if row is not None:
+            row["ts"] = time.time()  # when THIS card's numbers were computed - shown in the app as "last analyzed"
+        return row
 
     rows = [r for r in await asyncio.gather(*[one(n) for n in names]) if r and not r.get("error")]
     rows.sort(key=lambda r: (0 if r["direction"] != "none" and r.get("poi") else 1, -r["confidence"]))
@@ -893,6 +903,18 @@ def _has(q, *words):
     return any(re.search(r"\b" + w, q) for w in words)
 
 
+async def _natural(text, question, history=None):
+    """Optionally rewrite an already-computed report as a natural reply (see the module docstring). Only
+    called for open-ended/opinion-style branches of answer() below - never for exact-data commands."""
+    if not llm.available():
+        return text
+    try:
+        rewritten = await llm.rewrite(question, text, history)
+    except Exception:
+        rewritten = None
+    return rewritten or text
+
+
 async def answer(question, history=None):
     q = question.strip()
     ql = q.lower()
@@ -931,7 +953,7 @@ async def answer(question, history=None):
                 if assets:
                     break
     if _has(ql, "forex", "fx") and not any(a in C.FOREX and a not in ("XAUUSD", "DXY") for a in assets):
-        return await forex_briefing()
+        return await _natural(await forex_briefing(), question, history)
     style = _style_of(ql)
     focus = _focus_of(ql)
     if _has(ql, "journal") or (_has(ql, "win rate", "winrate", "track record", "accuracy", "statistics", "stats")
@@ -953,12 +975,12 @@ async def answer(question, history=None):
     sw = _has(ql, "setup", "trade idea", "entry", "stop loss", "take profit", "risk reward", "top-down", "top down",
               "strategy", "poi", "zone", "trade plan", "smc", "ict")
     if assets and not ops:
-        return await strategy_report(assets[0], style, focus)
+        return await _natural(await strategy_report(assets[0], style, focus), question, history)
     if not assets and (style or focus or sw) and not ops:
-        return await setups_ranking_text(style, focus)
+        return await _natural(await setups_ranking_text(style, focus), question, history)
     if assets:
         parts = [await asset_report(n) for n in assets[:2]]
-        return "\n\n".join(parts)
+        return await _natural("\n\n".join(parts), question, history)
     if _has(ql, "position", "trade open", "open trade", "exposure", "my trades"):
         return await positions_text()
     if _has(ql, "pnl", "profit", "performance", "perform", "how did", "how is the bot", "how's the bot", "win rate", "result"):
@@ -968,15 +990,15 @@ async def answer(question, history=None):
     if _has(ql, "risk", "profile", "hier", "scalp", "setting"):
         return status_text()
     if _has(ql, "forex", "fx", "currenc"):
-        return await forex_briefing()
+        return await _natural(await forex_briefing(), question, history)
     if _has(ql, "sentiment", "fear", "greed", "mood", "funding"):
-        return await sentiment_text()
+        return await _natural(await sentiment_text(), question, history)
     if _has(ql, "news", "headline"):
         return await news_text("forex" if _has(ql, "forex", "fx") else "crypto")
     if _has(ql, "best", "strong", "weak", "rank", "setup", "opportunit", "top", "watch"):
-        return await ranking_text()
+        return await _natural(await ranking_text(), question, history)
     if _has(ql, "crypto", "market", "overview", "brief", "summary", "today", "now", "outlook", "altcoin"):
-        return await crypto_briefing()
+        return await _natural(await crypto_briefing(), question, history)
     return HELP
 
 

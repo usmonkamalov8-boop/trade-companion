@@ -447,13 +447,20 @@ class Futures:
         pnl = fees = 0.0
         exit_px = None
         try:
-            tr = await self.c.f_user_trades(sym, int(t["ts"] * 1000) - 5000)
-            for x in tr:
+            # Attribute fills by exchange trade id, not by a time window: two trades on the same symbol can close
+            # within seconds of each other (fast reconcile, a short cooldown), and a window would double-count a
+            # prior trade's fills into this one. Each raw fill is only ever counted once, symbol-wide.
+            key = "consumed_trades:" + sym
+            consumed = set(store.kv_get(key, []))
+            tr = await self.c.f_user_trades(sym, int(t["ts"] * 1000) - 2000)
+            fresh = [x for x in tr if x["id"] not in consumed]
+            for x in fresh:
                 pnl += float(x["realizedPnl"])
                 fees += float(x["commission"])
-            outs = [x for x in tr if x["side"] == ("SELL" if t["side"] == "LONG" else "BUY")]
+            outs = [x for x in fresh if x["side"] == ("SELL" if t["side"] == "LONG" else "BUY")]
             if outs:
                 exit_px = float(outs[-1]["price"])
+            store.kv_set(key, sorted(consumed | {x["id"] for x in fresh})[-500:])
         except Exception:
             pass
         net = pnl - fees
@@ -548,6 +555,34 @@ class Futures:
             if t["symbol"] not in rep["left"]:
                 store.x("UPDATE trades SET close_reason='kill switch' WHERE id=?", (t["id"],))
         return rep
+
+    # ------------------------------------------------------------------ statistics
+    async def stats(self, limit=50):
+        """Aggregate performance over closed trades: PnL, win rate, average holding time, breakdown by symbol."""
+        closed = store.q("SELECT * FROM trades WHERE status='closed' ORDER BY close_ts DESC")
+        open_rows = store.q("SELECT * FROM trades WHERE status IN ('open','pending_entry')")
+        total = len(closed)
+        wins = sum(1 for r in closed if (r["pnl"] or 0) > 0)
+        pnl_total = sum((r["pnl"] or 0) for r in closed)
+        fees_total = sum((r["fees"] or 0) for r in closed)
+        holds = [r["close_ts"] - r["ts"] for r in closed if r["close_ts"] and r["ts"]]
+        by_symbol = {}
+        for r in closed:
+            d = by_symbol.setdefault(r["symbol"], {"trades": 0, "wins": 0, "pnl": 0.0})
+            d["trades"] += 1
+            d["wins"] += 1 if (r["pnl"] or 0) > 0 else 0
+            d["pnl"] += r["pnl"] or 0
+        by_symbol_list = [{"symbol": s, "trades": d["trades"], "wins": d["wins"],
+                           "win_rate": (d["wins"] / d["trades"] * 100) if d["trades"] else None, "pnl": d["pnl"]}
+                          for s, d in sorted(by_symbol.items(), key=lambda kv: -kv[1]["pnl"])]
+        history = [{"id": r["id"], "symbol": r["symbol"], "side": r["side"], "qty": r["qty"],
+                    "entry": r["entry_avg"] or r["entry_price"], "exit": r["exit_avg"], "pnl": r["pnl"], "fees": r["fees"],
+                    "reason": r["close_reason"], "opened_ts": r["ts"], "closed_ts": r["close_ts"],
+                    "hold_seconds": (r["close_ts"] - r["ts"]) if r["close_ts"] and r["ts"] else None} for r in closed[:limit]]
+        return {"open_positions": len(open_rows), "closed_trades": total, "wins": wins, "losses": total - wins,
+                "win_rate": (wins / total * 100) if total else None, "pnl_total": pnl_total, "fees_total": fees_total,
+                "pnl_avg": (pnl_total / total) if total else None, "avg_hold_seconds": (sum(holds) / len(holds)) if holds else None,
+                "by_symbol": by_symbol_list, "history": history}
 
     # ------------------------------------------------------------------ views for the app
     async def snapshot(self):

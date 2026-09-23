@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from . import backtest, bot, digest, econ, engine, events, hypotheses, journal, market, prefs, push, security, strategy, trade_api, tz, watcher, config as C
+from . import backtest, bot, digest, econ, engine, events, hypotheses, journal, llm, market, prefs, push, security, strategy, trade_api, tz, watcher, config as C
 
 
 @asynccontextmanager
@@ -224,7 +224,7 @@ async def diagnostics():
             "events": {"last_id": events.last_id()}, "push": push.info(), "calendar": econ.diag(), "timezone": tz.info(),
             "journal": journal.counts(), "rate_limit": {"until": getattr(market, "_ban", {}).get("until", 0),
                                                          "why": getattr(market, "_ban", {}).get("why", "")},
-            "security": await asyncio.to_thread(security.status), "digest": digest._load()}
+            "security": await asyncio.to_thread(security.status), "digest": digest._load(), "llm": llm.info()}
 
 
 @api.get("/digest")

@@ -5,6 +5,7 @@ import '../api.dart';
 import '../theme.dart';
 import 'grid_detail.dart';
 import 'order_ticket.dart';
+import 'stats.dart';
 
 class TradePage extends StatefulWidget {
   const TradePage({super.key});
@@ -136,6 +137,7 @@ class _TradePageState extends State<TradePage> {
     final s = st;
     return Scaffold(
       appBar: AppBar(title: const Text('Trade'), actions: [
+        IconButton(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const StatsPage())), icon: const Icon(Icons.bar_chart), tooltip: 'Statistics'),
         IconButton(onPressed: _load, icon: const Icon(Icons.refresh)),
       ]),
       floatingActionButton: FloatingActionButton.extended(

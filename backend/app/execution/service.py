@@ -367,6 +367,13 @@ async def resume(b: dict = Body(default={})):
     return dumps(await RT.fut.resume("app", bool(b.get("clear_panic"))))
 
 
+@app.get("/stats", dependencies=[R])
+async def stats():
+    f = await RT.fut.stats()
+    g = RT.grid.stats()
+    return dumps({"futures": f, "grid": g, "combined_pnl_total": f["pnl_total"] + g["total_profit"]})
+
+
 @app.get("/trades", dependencies=[R])
 async def trades(limit: int = 50):
     rows = store.q("SELECT * FROM trades WHERE status NOT IN ('failed','cancelled') ORDER BY ts DESC LIMIT ?", (limit,))
