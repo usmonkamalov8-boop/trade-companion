@@ -18,11 +18,19 @@ class _ForgotPinScreenState extends State<ForgotPinScreen> {
   bool _busy = false;
   String? _error;
 
+  // Builds a scheme-correct URL the same way Api's own _uri() helper does - Api.host is stored without a
+  // scheme (e.g. "185.196.117.48:8000"), so passing it straight into Uri.parse (as this file originally did)
+  // produced a malformed URI and would have failed on every tap.
+  Uri _url(String path) {
+    final base = Api.host.startsWith('http') ? Api.host : 'http://${Api.host}';
+    return Uri.parse('$base$path');
+  }
+
   Future<void> _requestCode() async {
     setState(() { _busy = true; _error = null; });
     try {
       final r = await http.post(
-        Uri.parse("${Api.host}/auth/pin-reset/request"),
+        _url("/auth/pin-reset/request"),
         headers: {"Authorization": "Bearer ${Api.token}"},
       );
       setState(() {
@@ -39,7 +47,7 @@ class _ForgotPinScreenState extends State<ForgotPinScreen> {
     setState(() { _busy = true; _error = null; });
     try {
       final r = await http.post(
-        Uri.parse("${Api.host}/auth/pin-reset/verify"),
+        _url("/auth/pin-reset/verify"),
         headers: {
           "content-type": "application/json",
           "Authorization": "Bearer ${Api.token}",
@@ -72,7 +80,7 @@ class _ForgotPinScreenState extends State<ForgotPinScreen> {
             padding: const EdgeInsets.all(28),
             child: Column(mainAxisSize: MainAxisSize.min, children: [
               if (!_sent) ...[
-                const Text("We\'ll email a 6-digit code to your recovery address.", textAlign: TextAlign.center),
+                const Text("We'll email a 6-digit code to your recovery address.", textAlign: TextAlign.center),
                 const SizedBox(height: 16),
                 FilledButton(onPressed: _busy ? null : _requestCode, child: Text(_busy ? "Sending..." : "Send code")),
               ] else ...[

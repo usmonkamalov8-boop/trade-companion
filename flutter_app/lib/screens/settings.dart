@@ -82,7 +82,7 @@ class SettingsPage extends StatelessWidget {
             _tile(context, Icons.monitor_heart_outlined, 'Diagnostics', 'Server, live feed, push and calendar status',
                 const DiagnosticsPage()),
             _tile(context, Icons.security_outlined, 'Security',
-                'App lock ${LocalPrefs.I.biometricLock ? 'on' : 'off'}',
+                'PIN required, fingerprint ${LocalPrefs.I.biometricLock ? 'on' : 'off'}',
                 const SecurityPage()),
             Panel(
               padding: EdgeInsets.zero,
@@ -286,19 +286,21 @@ class SecurityPage extends StatelessWidget {
             Panel(
               padding: const EdgeInsets.symmetric(vertical: 4),
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                  child: Text(
+                    "A PIN, set up the first time you open the app, is always required to unlock it - on launch "
+                    "and whenever it returns from the background. It can be reset by email from the lock screen "
+                    "if you forget it (\"Forgot PIN?\").",
+                    style: TextStyle(color: p.muted, fontSize: 12.5),
+                  ),
+                ),
                 SwitchListTile(
-                  title: const Text('Require unlock to open the app'),
-                  subtitle: Text('Fingerprint, Face ID, or your device PIN/pattern - on launch and whenever the app returns from the background.',
+                  title: const Text('Also allow fingerprint / Face ID'),
+                  subtitle: Text('A faster shortcut on top of your PIN, not a replacement for it - your PIN always still works.',
                       style: TextStyle(color: p.muted, fontSize: 12.5)),
                   value: lp.biometricLock,
                   onChanged: lp.setBiometricLock,
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-                  child: Text(
-                    'If this phone has no fingerprint/face unlock or PIN set up at all, the app opens normally either way - it never locks you out of your own account.',
-                    style: TextStyle(color: p.muted, fontSize: 11.5),
-                  ),
                 ),
               ]),
             ),
