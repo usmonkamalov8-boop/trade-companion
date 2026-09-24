@@ -33,9 +33,17 @@ jobs:
 
       - name: Bump Kotlin version (safety net in case the scaffold's default ever lags again)
         run: |
-          S=android/settings.gradle.kts
-          sed -i -E 's/(org\.jetbrains\.kotlin\.android"\) version ")[^"]+(")/\g<1>2.2.21\g<2>/' $S
-          grep -n "kotlin.android" $S
+          S=android/settings.gradle
+          if [ ! -f "$S" ]; then
+            echo "::warning::$S not found - listing android/ so we can see what actually got generated"
+            find android -maxdepth 1 -type f
+            exit 0
+          fi
+          echo "----- $S before -----"
+          cat "$S"
+          sed -i -E "s/(org\.jetbrains\.kotlin\.android[\"']?\)? version [\"'])[^\"']+([\"'])/\12.2.21\2/" "$S"
+          echo "----- $S after -----"
+          cat "$S"
 
       - name: Patch manifest (internet access, plain HTTP to your VPS, app name)
         run: |
