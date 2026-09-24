@@ -148,6 +148,30 @@ def _headlines(items, n=6):
     return out
 
 
+# Keywords signaling a genuinely market-moving story, as opposed to routine churn ("X partners with Y",
+# ordinary price-action recaps, minor listings). Deliberately broad, not an exhaustive or perfectly precise
+# classifier - the goal is filtering OUT noise for the dedicated news feed below, not scoring nuance. Only
+# applied to news_text() (the "show me the news" feature) - crypto_briefing/forex_briefing's own incidental
+# use of headlines is untouched, since narrowing their sample could quietly change their sentiment read.
+_HIGH_IMPACT_KEYWORDS = (
+    # macro / rates
+    "fed ", "federal reserve", "fomc", "interest rate", "rate hike", "rate cut", "rate decision",
+    "cpi", "inflation", "ppi", "nonfarm payroll", "nfp", "jobs report", "unemployment rate", "gdp",
+    "ecb", "boe", "boj", "central bank", "powell", "treasury yield", "recession",
+    # crypto-specific majors
+    "sec ", "etf approv", "etf reject", "halving", "hack", "exploit", "hacked", "exchange collapse",
+    "bankrupt", "delist", "regulation", "regulatory", " ban ", "lawsuit", "settlement", "indictment",
+    "network upgrade", "hard fork", "mainnet launch", "outage", "depeg", "liquidation cascade", "insolvent",
+    # geopolitical / broad risk-off triggers
+    "war", "sanctions", "tariff", "election result", "government shutdown", "credit rating", "default",
+)
+
+
+def _is_high_impact(title):
+    t = f" {title.lower()} "
+    return any(k in t for k in _HIGH_IMPACT_KEYWORDS)
+
+
 def _counts(rows):
     b = sum(1 for r in rows if r["score"] >= 15)
     s = sum(1 for r in rows if r["score"] <= -15)
@@ -340,8 +364,17 @@ async def news_text(cat):
     if not items:
         return "News feeds are unreachable right now."
     m, tone = A.news_tone(items)
-    return "\n".join([f"{cat.upper()} NEWS - tone {tone}", ""] + _headlines(items, 8)
-                     + ["", "[+] bullish keywords, [-] bearish keywords (simple keyword scoring, not a full read)."])
+    curated = [i for i in items if _is_high_impact(i["title"])]
+    lines = [f"{cat.upper()} NEWS - tone {tone}", ""]
+    if curated:
+        lines += _headlines(curated, 8)
+    else:
+        # Never show a confusingly empty feed just because nothing hit the high-impact keywords right now -
+        # fall back to the most recent items, with a clear note about why they're there.
+        lines += _headlines(items, 5)
+        lines.append("(no high-impact headlines in the current window - showing the most recent instead)")
+    lines += ["", "[+] bullish keywords, [-] bearish keywords (simple keyword scoring, not a full read)."]
+    return "\n".join(lines)
 
 
 async def sentiment_text():
@@ -919,6 +952,17 @@ def _has(q, *words):
     return any(re.search(r"\b" + w, q) for w in words)
 
 
+def _ai_unavailable_note():
+    """A short, honest note for when Gemini IS configured but a call just failed (a quota limit, an
+    overloaded model, a bad key) - distinct from Gemini never being set up at all, which needs no explanation.
+    Without this, a temporary Google-side outage and "the app just doesn't do this" look identical from the
+    chat, which is its own real source of confusion."""
+    info = llm.info()
+    if info.get("overloaded"):
+        return "_(the AI assistant is temporarily rate-limited or over its quota - showing the raw analysis instead)_\n\n"
+    return "_(the AI assistant is temporarily unavailable - showing the raw analysis instead)_\n\n"
+
+
 async def _natural(text, question, history=None):
     """Optionally rewrite an already-computed report as a natural reply (see the module docstring). Only
     called for open-ended/opinion-style branches of answer() below - never for exact-data commands."""
@@ -928,24 +972,53 @@ async def _natural(text, question, history=None):
         rewritten = await llm.rewrite(question, text, history)
     except Exception:
         rewritten = None
-    return rewritten or text
+    if rewritten:
+        return rewritten
+    return _ai_unavailable_note() + text
 
 
-async def _chat_fallback(question, history=None):
+async def _quick_state_summary():
+    """A short, best-effort snapshot of the user's actual current state (open positions, bot status) for the
+    Assistant to have as background awareness on a general question - e.g. "how's it going" should be able to
+    reference real positions, not just describe what the app can do in the abstract. Never used to answer a
+    precise data question - those stay in their own exact, literal branches elsewhere in this file; this is
+    only extra context for a reply that would otherwise have none at all. Any failure here is silent (returns
+    None), since a fallback reply without this extra color is still far better than no reply at all."""
+    parts = []
+    try:
+        pos = await positions_text()
+        if pos:
+            parts.append(f"Open positions: {pos[:300]}")
+    except Exception:
+        pass
+    try:
+        st = status_text()
+        if st:
+            parts.append(f"Bot status: {st[:200]}")
+    except Exception:
+        pass
+    return "\n".join(parts) if parts else None
+
+
+async def _chat_fallback(question, history=None, context=None):
     """Nothing in answer() below matched a specific command - this used to always be the static HELP text.
-    If an LLM is configured, it now replies naturally instead, grounded only in what the app can actually do
-    (there's no real trading data to give it here, since no command matched). Falls back to HELP on any
-    failure, exactly like _natural() does for the data-grounded branches."""
+    If an LLM is configured, it now replies naturally instead, grounded in what the app can actually do PLUS
+    a quick snapshot of the user's real current state (positions, bot status), so even a vague question gets
+    a personalized, situationally-aware reply rather than generic capability-listing text. Falls back to HELP
+    on any failure, exactly like _natural() does for the data-grounded branches."""
     if not llm.available():
         return HELP
     try:
-        reply = await llm.chat(question, history)
+        state = await _quick_state_summary()
+        reply = await llm.chat(question, history, extra_context=state)
     except Exception:
         reply = None
-    return reply or HELP
+    if reply:
+        return reply
+    return _ai_unavailable_note() + HELP
 
 
-async def answer(question, history=None):
+async def answer(question, history=None, context=None):
     q = question.strip()
     ql = q.lower()
     if _has(ql, "calendar", "red folder", "red-folder", "high impact", "high-impact", "economic", "nfp", "cpi", "fomc", "rate decision", "upcoming news"):
@@ -976,6 +1049,13 @@ async def answer(question, history=None):
     if _has(ql, "screener", "scanner", "scan all", "scan everything", "scan the market", "scan markets"):
         return await screener_text("crypto" if _has(ql, "crypto") else ("forex" if _has(ql, "forex", "fx") else None), _style_of(ql))
     assets = find_assets(q)
+    if not assets and context and context.get("asset"):
+        # The person didn't name an asset, but the app told us what they're currently looking at (e.g. the
+        # Chart or Markets screen) - use that instead of falling straight through to the generic fallback.
+        # Only trusted if it's a real, tracked asset; anything else is silently ignored rather than erroring.
+        ctx_asset = str(context["asset"]).strip().upper()
+        if ctx_asset in C.CRYPTO or ctx_asset in C.FOREX:
+            assets = [ctx_asset]
     if not assets and history and _has(ql, "it", "levels", "support", "resistance", "target", "entry", "why", "stop"):
         for m in reversed(history[:-1]):
             if m["role"] == "user":
@@ -1029,7 +1109,7 @@ async def answer(question, history=None):
         return await _natural(await ranking_text(), question, history)
     if _has(ql, "crypto", "market", "overview", "brief", "summary", "today", "now", "outlook", "altcoin"):
         return await _natural(await crypto_briefing(), question, history)
-    return await _chat_fallback(question, history)
+    return await _chat_fallback(question, history, context)
 
 
 async def typewriter(text, size=36, delay=0.012):

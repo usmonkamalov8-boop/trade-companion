@@ -2,6 +2,7 @@ import "dart:convert";
 import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
 import "api.dart";
+import "events.dart";
 import "pin_service.dart";
 import "pin_setup_screen.dart";
 import "theme.dart";
@@ -58,7 +59,19 @@ class _ForgotPinScreenState extends State<ForgotPinScreen> {
         await PinService.I.clearPin();
         if (!mounted) return;
         Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => PinSetupScreen(onDone: () => Navigator.of(context).pop())),
+          MaterialPageRoute(
+            builder: (_) => PinSetupScreen(
+              onDone: () {
+                // Deliberately NOT Navigator.of(context).pop() here: by the time this runs, the
+                // pushReplacement above has already disposed THIS screen (the one that captured this
+                // context), so that Navigator lookup throws - and since nothing caught it, the PIN got saved
+                // but the screen was left stuck forever on "Saving...". Toaster.navKey is the app's stable,
+                // always-valid Navigator reference (already used for toasts) and works regardless of which
+                // screen has since been disposed - pop all the way back to PinGate's root.
+                Toaster.navKey.currentState?.popUntil((route) => route.isFirst);
+              },
+            ),
+          ),
         );
       } else {
         setState(() { _busy = false; _error = jsonDecode(r.body)["detail"]?.toString() ?? "Incorrect code"; });

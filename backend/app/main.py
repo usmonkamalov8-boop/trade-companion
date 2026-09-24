@@ -323,6 +323,15 @@ async def custom_symbols():
     return {"symbols": list(C.CUSTOM_CRYPTO)}
 
 
+@api.get("/symbols/forex")
+async def forex_symbols(q: str = ""):
+    """The tracked forex/metals pairs (a small, curated list - unlike crypto, there's no live provider here
+    giving an exhaustive FX universe the way Binance does). Supports the same q= substring filter as
+    /api/trade/symbols for a consistent search-picker experience across both."""
+    q = q.upper()
+    return [n for n in C.FOREX if n != "DXY" and q in n]
+
+
 @api.post("/symbols/custom")
 async def custom_symbols_add(b: CustomSymbolIn):
     raw = b.symbol.strip().upper().replace(" ", "")

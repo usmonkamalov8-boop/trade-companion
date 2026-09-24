@@ -9,6 +9,10 @@ import 'pin_setup_screen.dart';
 import 'prefs.dart';
 import 'theme.dart';
 
+// Locks once, at cold start (a fresh launch/full restart), and never re-locks just because the app was
+// briefly backgrounded (switching apps, pulling down the notification shade, a phone call) - that repeated
+// re-prompting was more aggressive than intended. There is deliberately no app-lifecycle observer here
+// anymore: locking is owned entirely by _init()'s one-time check on cold start.
 class PinGate extends StatefulWidget {
   final Widget child;
   const PinGate({super.key, required this.child});
@@ -16,7 +20,7 @@ class PinGate extends StatefulWidget {
   State<PinGate> createState() => _PinGateState();
 }
 
-class _PinGateState extends State<PinGate> with WidgetsBindingObserver {
+class _PinGateState extends State<PinGate> {
   final _auth = LocalAuthentication();
   final _pin = TextEditingController();
   bool _checkedSetup = false;
@@ -28,7 +32,6 @@ class _PinGateState extends State<PinGate> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
     _init();
   }
 
@@ -42,25 +45,6 @@ class _PinGateState extends State<PinGate> with WidgetsBindingObserver {
     });
     if (has) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _maybeBiometric());
-    }
-  }
-
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    super.dispose();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (!_checkedSetup || _needsSetup) return; // never lock mid-setup
-    if (state == AppLifecycleState.paused) {
-      setState(() {
-        _locked = true;
-        _error = null;
-      });
-    } else if (state == AppLifecycleState.resumed && _locked) {
-      _maybeBiometric();
     }
   }
 

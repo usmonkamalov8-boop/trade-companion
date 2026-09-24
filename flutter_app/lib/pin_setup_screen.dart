@@ -41,7 +41,18 @@ class _PinSetupScreenState extends State<PinSetupScreen> {
     }
     setState(() => _busy = true);
     await PinService.I.setPin(_first.text);
-    widget.onDone();
+    if (!mounted) return;
+    try {
+      widget.onDone();
+    } catch (e) {
+      // The PIN itself is already saved successfully above - this only guards against onDone() (supplied by
+      // whoever is using this screen) failing to navigate away for some reason. Never leave the screen stuck
+      // on a spinner over what would otherwise be a purely cosmetic navigation failure.
+      setState(() {
+        _busy = false;
+        _error = 'PIN saved, but could not return automatically. Please reopen the app.';
+      });
+    }
   }
 
   @override
