@@ -72,7 +72,7 @@ class _ForgotPinScreenState extends State<ForgotPinScreen> {
             padding: const EdgeInsets.all(28),
             child: Column(mainAxisSize: MainAxisSize.min, children: [
               if (!_sent) ...[
-                const Text("We'll email a 6-digit code to your recovery address.", textAlign: TextAlign.center),
+                const Text("We\'ll email a 6-digit code to your recovery address.", textAlign: TextAlign.center),
                 const SizedBox(height: 16),
                 FilledButton(onPressed: _busy ? null : _requestCode, child: Text(_busy ? "Sending..." : "Send code")),
               ] else ...[
