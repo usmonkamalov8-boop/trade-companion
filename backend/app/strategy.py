@@ -15,15 +15,15 @@ from . import analytics as A, tz as TZ
 # with a far first target were hit far less often than the bonus assumed; replicated on two windows, 4 of 4 comparisons).
 # The bonus only affects the confidence score, never which setups exist, their zones, stops or targets.
 # Bump the version ONLY when a scoring or entry rule changes; every backtest records the rule set it ran on.
-RULE_SETS = {"r1": "r1-2026-09", "r2": "r2-2026-09"}
-RULESET = "r2"
+RULE_SETS = {"r1": "r1-2026-09", "r2": "r2-2026-09", "r3": "r3-2026-09"}
+RULESET = "r3"
 
 
 def rules_version(ruleset=None):
-    return RULE_SETS.get(ruleset or RULESET, RULE_SETS["r2"])
+    return RULE_SETS.get(ruleset or RULESET, RULE_SETS[RULESET])
 
 
-RULES_VERSION = RULE_SETS["r2"]
+RULES_VERSION = RULE_SETS[RULESET]
 
 STYLES = {
     "scalp": {"ctx": "4h", "bias": "1h", "setup": "15m", "trigger": "5m", "label": "Scalping", "reach": 4.0},
@@ -45,7 +45,6 @@ def tfl(tf):
 
 MODULES = ("structure", "ob", "fvg", "sd", "sr", "fib", "trend", "liquidity", "volume", "ict", "poi")
 ROLE_W = {"ctx": 0.2, "bias": 0.4, "setup": 0.25, "trigger": 0.15}
-
 
 # ------------------------------------------------------------------ primitives
 
@@ -232,7 +231,6 @@ def order_blocks(c, st, atr):
             breakers.append({**z, "type": "Breaker", "dir": -d, "dead_idx": dead})
     return active[-5:], breakers[-3:]
 
-
 def fvgs(c, atr, max_age=120):
     o, h, l, cl = c["o"], c["h"], c["l"], c["c"]
     n = len(cl)
@@ -365,7 +363,6 @@ def _fit_line(pts, cl, atr_now, ascending):
                 best = cand
     return best
 
-
 def trendlines(c, piv, atr_now):
     cl = c["c"]
     n = len(cl)
@@ -486,7 +483,6 @@ def _rsi_series(cl, n=14):
         al = (al * (n - 1) + max(-d, 0)) / n
         out[i] = 100.0 if al == 0 else 100 - 100 / (1 + ag / al)
     return out
-
 
 def divergence(alt, rs, n):
     """Regular RSI divergence between the last two swing points (only if the latest one is recent)."""
@@ -615,9 +611,22 @@ def _z(typ, tf, low, high, base, fresh=True, note="", vol=None):
     return {"type": typ, "tf": tf, "low": low, "high": high, "base": base, "fresh": fresh, "note": note, "vol": vol}
 
 
-def collect_zones(s, per, price, mods):
+def collect_zones(s, per, price, mods, user_levels=None):
     zs = []
     side = "bullish" if s == 1 else "bearish"
+    # User-drawn levels take absolute priority over anything mechanically detected - a person deliberately
+    # marking a level is stronger evidence than an automatic pattern match. Not gated by RULESET: this only
+    # ever activates when real user-drawn data is actually supplied, so r1/r2 are unaffected unless a level
+    # has genuinely been passed in - the persistence/drawing UI itself is separate, later work.
+    if user_levels:
+        atr_ref = next((per[r]["atr"] for r in ("setup", "bias") if per.get(r)), None)
+        band = 0.15 * atr_ref if atr_ref else max(price * 0.001, 1e-9)
+        for lvl in user_levels:
+            lp, ltype = lvl.get("price"), lvl.get("type")
+            if lp is None or ltype not in ("support", "resistance"):
+                continue
+            if (s == 1 and ltype == "support") or (s == -1 and ltype == "resistance"):
+                zs.append(_z("User S/R", "user", lp - band, lp + band, 10.0, True, "user-drawn level (maximum priority)"))
     for role in ("setup", "bias"):
         a = per.get(role)
         if not a:
@@ -626,6 +635,8 @@ def collect_zones(s, per, price, mods):
         if mods.get("ob", True):
             for z in a["obs"]:
                 if z["dir"] == s:
+                    if RULESET == "r3" and not z["fresh"]:
+                        continue  # r3: unmitigated Order Blocks only - a tested OB is not a valid POI anchor at all
                     zs.append(_z("OB", tf, z["low"], z["high"],
                                  3.0 + (0.7 if z["src"] == "CHoCH" else 0) + (0.5 if z["fresh"] else 0)
                                  + min(1.0, z["strength"] / 8) + hb, z["fresh"], f"{side} OB after {z['src']}", z.get("vol")))
@@ -646,7 +657,12 @@ def collect_zones(s, per, price, mods):
         if mods.get("sr", True):
             for x in a["sr"]:
                 ok = x["price"] < price if s == 1 else x["price"] > price
-                if ok and x["strength"] >= 2:
+                # r3: literal 2+ touches required for validity (r1/r2 also counted a support/resistance flip as
+                # a bonus "touch" for validity, not just for score weight - r3 separates the two: a flip still
+                # boosts the score below via `strength`, but only real touches decide whether the level counts
+                # at all).
+                valid = x["touches"] >= 2 if RULESET == "r3" else x["strength"] >= 2
+                if ok and valid:
                     zs.append(_z("S/R", tf, x["price"] - 0.15 * a["atr"], x["price"] + 0.15 * a["atr"],
                                  1.0 + min(1.5, 0.5 * x["strength"]) + hb, True,
                                  f"{'support' if s == 1 else 'resistance'} ({x['touches']} touches)"))
@@ -694,8 +710,15 @@ def rank_pois(s, zones, price, atr_setup, reach):
     return out[:3]
 
 
-def collect_targets(s, entry, per, ict, mods, atr_setup):
+def collect_targets(s, entry, per, ict, mods, atr_setup, user_levels=None):
     c = []
+    if user_levels:
+        for lvl in user_levels:
+            lp, ltype = lvl.get("price"), lvl.get("type")
+            if lp is None or ltype not in ("support", "resistance"):
+                continue
+            if (lp > entry) if s == 1 else (lp < entry):
+                c.append((lp, f"user-drawn {ltype}"))
     for role in ("setup", "bias", "ctx"):
         a = per.get(role)
         if not a:
@@ -747,7 +770,6 @@ def collect_targets(s, entry, per, ict, mods, atr_setup):
         if not out or abs(p - out[-1][0]) > 0.3 * atr_setup:
             out.append((p, lab))
     return out
-
 
 def _dirword(d):
     return "Bullish" if d == 1 else ("Bearish" if d == -1 else "Neutral")
@@ -860,7 +882,7 @@ def observations(s, per, per_all, style, kind, ict):
     return out
 
 
-def make_setup(name, style, per, ict, dec, mods, kind, per_all=None, news=None):
+def make_setup(name, style, per, ict, dec, mods, kind, per_all=None, news=None, btc=None, user_levels=None):
     cfg = STYLES[style]
     setup, bias, trig, ctx = per["setup"], per["bias"], per.get("trigger"), per.get("ctx")
     fmt = lambda x: A.fmt(x, dec)
@@ -895,7 +917,7 @@ def make_setup(name, style, per, ict, dec, mods, kind, per_all=None, news=None):
     res["align"] = align
     notes = []
 
-    zones = collect_zones(s, per, px, mods)
+    zones = collect_zones(s, per, px, mods, user_levels)
     pois = rank_pois(s, zones, px, a, cfg["reach"])
     fib = setup["fib"]
     sweeps = [w for w in setup["liq"]["sweeps"] if (w["type"] == "SSL" and s == 1) or (w["type"] == "BSL" and s == -1)]
@@ -906,6 +928,16 @@ def make_setup(name, style, per, ict, dec, mods, kind, per_all=None, news=None):
                         f"{tfl(setup['tf'])} chart. Wait for price to retrace into a zone."]
         return res
     poi = pois[0]
+    if RULESET == "r3" and len(poi["confluence"]) < 2:
+        # r3: a minimum of 3 distinct confluences required for a valid setup - the POI's own type is the first,
+        # so at least 2 OTHER overlapping factor types must agree at the same zone.
+        res["status"] = "LOW CONFLUENCE"
+        have = 1 + len(poi["confluence"])
+        what = poi["type"] + (f" + {', '.join(poi['confluence'])}" if poi["confluence"] else "")
+        res["notes"] = [f"{_dirword(s)} bias ({reason}) found a {poi['type']} on {poi['tf']} but only {have} "
+                        f"confluence factor(s) there ({what}) - r3 requires at least 3. Wait for more factors "
+                        f"(OB, FVG, S/D, S/R, trendline, Fib OTE) to line up at the same zone."]
+        return res
     zl, zh = poi["low"], poi["high"]
     refined = False
     if zh - zl > 1.5 * a:            # tall higher-timeframe zone: enter in its proximal half
@@ -930,7 +962,7 @@ def make_setup(name, style, per, ict, dec, mods, kind, per_all=None, news=None):
         notes.append("The zone is tall: the stop was tightened to 3 ATR. Refine it with the trigger-timeframe swing once price is inside.")
     risk = max(abs(entry - sl), 0.3 * a)
 
-    tgts = collect_targets(s, entry, per, ict, mods, a)
+    tgts = collect_targets(s, entry, per, ict, mods, a, user_levels)
     tp = []
     for p, lab in tgts:
         tp.append({"price": p, "label": lab, "rr": s * (p - entry) / risk})
@@ -1004,6 +1036,26 @@ def make_setup(name, style, per, ict, dec, mods, kind, per_all=None, news=None):
                 add("volvalid", "Volume validation", 4, f"the {poi['type']} formed on {pv:.1f}x the average volume: significant participation")
             elif pv < 0.75:
                 add("volvalid", "Volume validation", -4, f"the {poi['type']} formed on only {pv:.1f}x the average volume: likely noise")
+    if RULESET == "r3":
+        # Order flow (taker buy/sell ratio) was already computed by analyze_tf() but never used anywhere until
+        # r3 - a small, honest weight (matching volume validation's own +-4), not a dominant one.
+        tk = setup.get("taker")
+        if tk is not None:
+            if (s == 1 and tk >= 0.55) or (s == -1 and tk <= 0.45):
+                add("taker", "Order flow", 4, f"{tk * 100:.0f}% {'buy' if s == 1 else 'sell'}-side taker flow on {tfl(setup['tf'])} agrees with the {word}")
+            elif (s == 1 and tk <= 0.45) or (s == -1 and tk >= 0.55):
+                add("taker", "Order flow", -4, f"{tk * 100:.0f}% {'sell' if s == 1 else 'buy'}-side taker flow on {tfl(setup['tf'])} is against the {word}")
+        # BTC alignment: added at your explicit request, without a validated backtest behind it yet (unlike
+        # r1->r2, which WAS backed by a replicated backtest finding) - kept as a modest weight for that reason,
+        # matching other minor factors rather than a dominant one. The underlying bias/setup values were
+        # already being computed correctly for shadow-mode logging (shadow_features); this is the same real
+        # data, now also feeding the live score for crypto assets other than BTC itself.
+        if kind == "crypto" and name != "BTC" and btc and btc.get("bias") is not None:
+            btc_align = btc["bias"] * s
+            if btc_align > 0:
+                add("btc", "BTC alignment", 6, f"BTC's own {tfl(cfg['bias'])} trend agrees with the {word} (BTC leads the crypto market)")
+            elif btc_align < 0:
+                add("btc", "BTC alignment", -6, f"BTC's own {tfl(cfg['bias'])} trend is against the {word} (BTC leads the crypto market)")
     if trig_ok:
         add("trigger", "Lower-timeframe confirmation", 10, trig_txt)
     else:
@@ -1148,7 +1200,7 @@ def closed_result(name, kind, style, tfs, dec, ict, why, age=None):
 
 def active_zones(per, per_all, reach):
     """Order blocks, FVGs and supply/demand zones on the setup and bias charts that are still active
-    and within `reach` ATR of price."""
+    and within reach ATR of price."""
     a = per.get("setup")
     if not a:
         return {"count": 0, "bull": 0, "bear": 0, "in_zone": False, "nearest": None}
@@ -1167,8 +1219,7 @@ def active_zones(per, per_all, reach):
     return {"count": len(zs), "bull": sum(1 for z in zs if z["dir"] == 1), "bear": sum(1 for z in zs if z["dir"] == -1),
             "in_zone": any(z["dist_atr"] == 0 for z in zs), "nearest": zs[0] if zs else None}
 
-
-def build(name, kind, style, tfs, dec=None, mods=None, ts=None, news=None):
+def build(name, kind, style, tfs, dec=None, mods=None, ts=None, news=None, btc=None, user_levels=None):
     mods = mods or {}
     cfg = STYLES[style]
     ict = ict_context(tfs, kind, ts)
@@ -1188,14 +1239,13 @@ def build(name, kind, style, tfs, dec=None, mods=None, ts=None, news=None):
     per = {role: per_all.get(cfg[role]) for role in ROLE_W}
     if not per["setup"] or not per["bias"]:
         return {"name": name, "kind": kind, "style": style, "error": "not enough price history for this style"}
-    setup = make_setup(name, style, per, ict, dec, mods, kind, per_all, news)
+    setup = make_setup(name, style, per, ict, dec, mods, kind, per_all, news, btc, user_levels)
     px = per["setup"]["price"]
     return {"name": name, "kind": kind, "style": style, "price": px, "dec": dec, "ict": ict, "setup": setup,
             "_per": per, "_all": per_all, "confidence": setup["confidence"],
             "zones": active_zones(per, per_all, cfg["reach"])}
 
 
-# --------------------------------------------------------------------- report
 
 
 def _levels_line(pts, fmt, n=3):

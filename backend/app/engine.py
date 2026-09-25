@@ -691,15 +691,23 @@ async def analyze(name, style):
     tfs, news, fund = await asyncio.gather(market.get_tfs(name, kind, list(strategy.ALL_TFS)), _news(),
                                            market.funding() if kind == "crypto" else asyncio.sleep(0, {}))
     dec = None if kind == "crypto" else C.FOREX[name][1]
-    res = await asyncio.to_thread(strategy.build, name, kind, style, tfs, dec, mods, time.time(), news)
-    res["news_active"] = news is not None
-    # shadow mode: log extra numbers next to the setup without touching scores, alerts or entries
+
+    # BTC's own trend - computed once, before build(), and reused for both r3's live BTC-alignment confluence
+    # factor AND the shadow-mode log below (this used to be computed only after build(), purely for shadow
+    # logging; moved earlier so the same real data can now also feed the actual score for r3).
+    btc = None
     try:
-        btc = None
-        if kind == "crypto" and name != "BTC" and not res.get("error") and not res.get("closed"):
+        if kind == "crypto" and name != "BTC":
             b = await analyze("BTC", style)
             if b.get("_per") and b["_per"].get("bias") and b["_per"].get("setup"):
                 btc = {"bias": b["_per"]["bias"]["trend"], "setup": b["_per"]["setup"]["trend"]}
+    except Exception:
+        btc = None
+
+    res = await asyncio.to_thread(strategy.build, name, kind, style, tfs, dec, mods, time.time(), news, btc)
+    res["news_active"] = news is not None
+    # shadow mode: log extra numbers next to the setup without touching scores, alerts or entries
+    try:
         res["shadow"] = strategy.shadow_features(res, (fund or {}).get(name + "USDT"), btc) if not res.get("error") else {}
     except Exception:
         res["shadow"] = {}
@@ -1018,48 +1026,7 @@ async def _chat_fallback(question, history=None, context=None):
     return _ai_unavailable_note() + HELP
 
 
-async def order_guidance(question, order, history=None):
-    """AI commentary for the order ticket's "Ask AI" panel: given a draft order (symbol, side, entry, stop,
-    target, leverage - plus the risk numbers the ticket's own /api/trade/order/preview already computed, like
-    risk_pct/rr/liq_est) and the person's question, ask Gemini for genuine, grounded commentary. The order's
-    numbers are never recomputed or guessed here - they're passed through exactly as the ticket already shows
-    them, so the AI can only comment on real figures, not invent new ones. Falls back to a short, honest
-    message if Gemini isn't configured, and to the raw context (still useful on its own) if a call fails."""
-    symbol = str(order.get("symbol", "")).strip().upper()
-    style = str(order.get("style") or "intraday")
-    if not llm.available():
-        return "AI commentary isn't turned on yet - add GEMINI_API_KEY in backend/.env to enable this."
-
-    context_text = None
-    base = symbol[:-4] if symbol.endswith("USDT") else symbol
-    if base in C.CRYPTO:
-        try:
-            report = await strategy_report(base, style, None)
-            context_text = f"TECHNICAL ANALYSIS for {base}:\n{report[:3000]}"
-        except Exception:
-            pass
-
-    order_lines = [f"{k}: {v}" for k, v in order.items() if v is not None and k not in ("style",)]
-    order_text = ("DRAFT ORDER BEING CONSIDERED (all numbers below, including risk/reward figures, are already "
-                 "computed by the app - use them exactly as given, never recompute or guess a different "
-                 "value):\n" + "\n".join(order_lines))
-    full_context = f"{context_text}\n\n{order_text}" if context_text else order_text
-
-    try:
-        reply = await llm.rewrite(question, full_context, history, max_tokens=900)
-    except Exception:
-        reply = None
-    if reply:
-        return reply
-    return _ai_unavailable_note() + "Here's the context this would have used:\n\n" + full_context
-
-
 async def answer(question, history=None, context=None):
-    if context and context.get("order"):
-        # The order ticket's "Ask AI" panel sends the draft trade directly - this is a distinct use case from
-        # the normal chat routing below (a free-form question about a SPECIFIC proposed trade, not a general
-        # market question), so it's handled entirely separately rather than folded into the keyword routing.
-        return await order_guidance(question, context["order"], history)
     q = question.strip()
     ql = q.lower()
     if _has(ql, "calendar", "red folder", "red-folder", "high impact", "high-impact", "economic", "nfp", "cpi", "fomc", "rate decision", "upcoming news"):
