@@ -1,6 +1,7 @@
 // Manual order ticket (futures) and spot-grid wizard, as two tabs.
 import 'package:flutter/material.dart';
 import '../api.dart';
+import '../symbol_picker.dart';
 import '../theme.dart';
 
 class OrderTicketPage extends StatefulWidget {
@@ -26,6 +27,77 @@ class _OrderTicketPageState extends State<OrderTicketPage> with SingleTickerProv
         ),
         body: TabBarView(controller: tab, children: const [_FuturesTicket(), _GridWizard()]),
       );
+}
+
+/// A tappable, non-freeform symbol selector - opens the searchable picker rather than accepting typed text
+/// directly, so every symbol placed here is guaranteed to be a real, live Binance pair rather than a typo.
+class _SymbolField extends StatelessWidget {
+  final String symbol;
+  final String kind; // 'fut' | 'spot' - which market the picker searches
+  final String title;
+  final ValueChanged<String> onChanged;
+  const _SymbolField({required this.symbol, required this.kind, required this.title, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.pal;
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: () async {
+        final s = await showSymbolPicker(context, kind: kind, title: title);
+        if (s != null) onChanged(s);
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+        decoration: BoxDecoration(
+          color: p.surface,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: p.outline),
+        ),
+        child: Row(children: [
+          CircleAvatar(
+            radius: 15,
+            backgroundColor: p.bg,
+            child: Text(
+              symbol.isNotEmpty ? symbol[0] : '?',
+              style: TextStyle(fontSize: 13, color: p.accent, fontWeight: FontWeight.bold),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(symbol.isEmpty ? 'Select a pair' : symbol,
+                  style: numStyle.copyWith(fontSize: 17, fontWeight: FontWeight.w700)),
+              Text(kind == 'fut' ? 'USDT-M Futures' : 'Spot', style: TextStyle(color: p.muted, fontSize: 12)),
+            ]),
+          ),
+          Icon(Icons.unfold_more, color: p.muted),
+        ]),
+      ),
+    );
+  }
+}
+
+/// A labeled group of fields, giving the ticket real visual sections instead of one long flat list.
+class _Section extends StatelessWidget {
+  final String label;
+  final Widget child;
+  const _Section({required this.label, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.pal;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Panel(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(label.toUpperCase(), style: TextStyle(color: p.muted, fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 0.6)),
+          const SizedBox(height: 10),
+          child,
+        ]),
+      ),
+    );
+  }
 }
 
 class _FuturesTicket extends StatefulWidget {
@@ -109,55 +181,77 @@ class _FuturesTicketState extends State<_FuturesTicket> {
     final p = context.pal;
     final v = preview;
     final ok = v?['ok'] == true;
+    final isLong = side == 'LONG';
     return ListView(padding: const EdgeInsets.all(12), children: [
-      TextField(controller: symbol, decoration: const InputDecoration(labelText: 'Symbol', hintText: 'BTCUSDT')),
-      const SizedBox(height: 8),
-      SegmentedButton<String>(
-        segments: const [ButtonSegment(value: 'LONG', label: Text('Long')), ButtonSegment(value: 'SHORT', label: Text('Short'))],
-        selected: {side},
-        onSelectionChanged: (v) => setState(() => side = v.first),
+      _SymbolField(
+        symbol: symbol.text.trim().toUpperCase(),
+        kind: 'fut',
+        title: 'Select futures pair',
+        onChanged: (s) => setState(() => symbol.text = s),
       ),
-      const SizedBox(height: 8),
-      SegmentedButton<String>(
-        segments: const [ButtonSegment(value: 'LIMIT', label: Text('Limit')), ButtonSegment(value: 'MARKET', label: Text('Market'))],
-        selected: {entryType},
-        onSelectionChanged: (v) => setState(() => entryType = v.first),
-      ),
-      if (entryType == 'LIMIT') ...[const SizedBox(height: 8), TextField(controller: price, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Limit price'))],
-      const SizedBox(height: 8),
-      Row(children: [
-        Expanded(child: TextField(controller: stop, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Stop'))),
-        const SizedBox(width: 8),
-        Expanded(child: TextField(controller: tp, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Target'))),
-      ]),
-      const SizedBox(height: 12),
-      Text('Size by', style: TextStyle(color: p.muted, fontSize: 12)),
-      SegmentedButton<String>(
-        segments: const [ButtonSegment(value: 'risk', label: Text('Risk %')), ButtonSegment(value: 'qty', label: Text('Quantity')), ButtonSegment(value: 'notional', label: Text('Value'))],
-        selected: {sizeMode},
-        onSelectionChanged: (v) => setState(() => sizeMode = v.first),
-      ),
-      const SizedBox(height: 8),
-      if (sizeMode == 'risk') TextField(controller: riskPct, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Risk % of account', suffixText: '%')),
-      if (sizeMode == 'qty') TextField(controller: qty, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Quantity')),
-      if (sizeMode == 'notional') TextField(controller: notional, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Position value (USDT)')),
-      const SizedBox(height: 12),
+      const SizedBox(height: 14),
       Row(children: [
         Expanded(
-          child: TextField(controller: leverage, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Leverage')),
+          child: _SideButton(label: 'Long', selected: isLong, color: p.gain, onTap: () => setState(() => side = 'LONG')),
         ),
-        const SizedBox(width: 8),
+        const SizedBox(width: 10),
         Expanded(
-          child: DropdownButtonFormField<String>(
-            initialValue: marginType,
-            items: const [DropdownMenuItem(value: 'ISOLATED', child: Text('Isolated')), DropdownMenuItem(value: 'CROSSED', child: Text('Cross'))],
-            onChanged: (v) => setState(() => marginType = v!),
-            decoration: const InputDecoration(labelText: 'Margin'),
+          child: _SideButton(label: 'Short', selected: !isLong, color: p.loss, onTap: () => setState(() => side = 'SHORT')),
+        ),
+      ]),
+      const SizedBox(height: 14),
+      _Section(
+        label: 'Entry',
+        child: Column(children: [
+          SegmentedButton<String>(
+            segments: const [ButtonSegment(value: 'LIMIT', label: Text('Limit')), ButtonSegment(value: 'MARKET', label: Text('Market'))],
+            selected: {entryType},
+            onSelectionChanged: (v) => setState(() => entryType = v.first),
           ),
-        ),
-      ]),
-      const SizedBox(height: 16),
-      FilledButton(onPressed: busy ? null : _preview, child: const Text('Preview')),
+          if (entryType == 'LIMIT') ...[
+            const SizedBox(height: 10),
+            TextField(controller: price, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Limit price')),
+          ],
+        ]),
+      ),
+      _Section(
+        label: 'Protection',
+        child: Row(children: [
+          Expanded(child: TextField(controller: stop, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Stop'))),
+          const SizedBox(width: 8),
+          Expanded(child: TextField(controller: tp, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Target'))),
+        ]),
+      ),
+      _Section(
+        label: 'Position size',
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          SegmentedButton<String>(
+            segments: const [ButtonSegment(value: 'risk', label: Text('Risk %')), ButtonSegment(value: 'qty', label: Text('Quantity')), ButtonSegment(value: 'notional', label: Text('Value'))],
+            selected: {sizeMode},
+            onSelectionChanged: (v) => setState(() => sizeMode = v.first),
+          ),
+          const SizedBox(height: 10),
+          if (sizeMode == 'risk') TextField(controller: riskPct, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Risk % of account', suffixText: '%')),
+          if (sizeMode == 'qty') TextField(controller: qty, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Quantity')),
+          if (sizeMode == 'notional') TextField(controller: notional, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Position value (USDT)')),
+          const SizedBox(height: 10),
+          Row(children: [
+            Expanded(
+              child: TextField(controller: leverage, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Leverage')),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: DropdownButtonFormField<String>(
+                initialValue: marginType,
+                items: const [DropdownMenuItem(value: 'ISOLATED', child: Text('Isolated')), DropdownMenuItem(value: 'CROSSED', child: Text('Cross'))],
+                onChanged: (v) => setState(() => marginType = v!),
+                decoration: const InputDecoration(labelText: 'Margin'),
+              ),
+            ),
+          ]),
+        ]),
+      ),
+      FilledButton.tonal(onPressed: busy ? null : _preview, child: const Text('Preview')),
       const SizedBox(height: 8),
       if (error != null) Text(error!, style: TextStyle(color: p.loss)),
       if (v != null)
@@ -173,9 +267,45 @@ class _FuturesTicketState extends State<_FuturesTicket> {
             for (final w in (v['warnings'] as List? ?? [])) Text(w, style: TextStyle(color: p.warn)),
           ]),
         ),
-      const SizedBox(height: 8),
-      if (ok) FilledButton(onPressed: busy ? null : _submit, child: const Text('Place order')),
+      const SizedBox(height: 12),
+      if (ok)
+        SizedBox(
+          height: 50,
+          child: FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: isLong ? p.gain : p.loss, foregroundColor: Colors.white, textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+            onPressed: busy ? null : _submit,
+            child: Text('${isLong ? 'Buy / Long' : 'Sell / Short'} ${symbol.text.toUpperCase()}'),
+          ),
+        ),
     ]);
+  }
+}
+
+class _SideButton extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final Color color;
+  final VoidCallback onTap;
+  const _SideButton({required this.label, required this.selected, required this.color, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.pal;
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: selected ? color.withAlpha(46) : p.surface,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: selected ? color : p.outline, width: selected ? 1.6 : 1),
+        ),
+        child: Text(label, style: TextStyle(color: selected ? color : p.muted, fontWeight: FontWeight.w700, fontSize: 15)),
+      ),
+    );
   }
 }
 
@@ -265,27 +395,38 @@ class _GridWizardState extends State<_GridWizard> {
     final ok = v?['ok'] == true;
     final sg = v?['suggest'] as Map<String, dynamic>?;
     return ListView(padding: const EdgeInsets.all(12), children: [
-      TextField(controller: symbol, decoration: const InputDecoration(labelText: 'Symbol (spot)', hintText: 'BTCUSDT')),
-      const SizedBox(height: 8),
-      Row(children: [
-        Expanded(child: TextField(controller: lower, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Lower price'))),
-        const SizedBox(width: 8),
-        Expanded(child: TextField(controller: upper, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Upper price'))),
-      ]),
-      const SizedBox(height: 8),
-      Row(children: [
-        Expanded(child: TextField(controller: gridsC, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Number of grids'))),
-        const SizedBox(width: 8),
-        Expanded(child: TextField(controller: invest, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Investment (USDT)'))),
-      ]),
-      const SizedBox(height: 8),
-      SegmentedButton<String>(
-        segments: const [ButtonSegment(value: 'arithmetic', label: Text('Even spacing')), ButtonSegment(value: 'geometric', label: Text('% spacing'))],
-        selected: {mode},
-        onSelectionChanged: (v) => setState(() => mode = v.first),
+      _SymbolField(
+        symbol: symbol.text.trim().toUpperCase(),
+        kind: 'spot',
+        title: 'Select spot pair',
+        onChanged: (s) => setState(() => symbol.text = s),
       ),
-      const SizedBox(height: 12),
-      FilledButton(onPressed: busy ? null : _plan, child: const Text('Calculate')),
+      const SizedBox(height: 14),
+      _Section(
+        label: 'Range',
+        child: Column(children: [
+          Row(children: [
+            Expanded(child: TextField(controller: lower, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Lower price'))),
+            const SizedBox(width: 8),
+            Expanded(child: TextField(controller: upper, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Upper price'))),
+          ]),
+          const SizedBox(height: 10),
+          SegmentedButton<String>(
+            segments: const [ButtonSegment(value: 'arithmetic', label: Text('Even spacing')), ButtonSegment(value: 'geometric', label: Text('% spacing'))],
+            selected: {mode},
+            onSelectionChanged: (v) => setState(() => mode = v.first),
+          ),
+        ]),
+      ),
+      _Section(
+        label: 'Grid setup',
+        child: Row(children: [
+          Expanded(child: TextField(controller: gridsC, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Number of grids'))),
+          const SizedBox(width: 8),
+          Expanded(child: TextField(controller: invest, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Investment (USDT)'))),
+        ]),
+      ),
+      FilledButton.tonal(onPressed: busy ? null : _plan, child: const Text('Calculate')),
       const SizedBox(height: 8),
       if (error != null) Text(error!, style: TextStyle(color: p.loss)),
       if (sg != null)
@@ -313,8 +454,16 @@ class _GridWizardState extends State<_GridWizard> {
             for (final w in (v['warnings'] as List? ?? [])) Text('$w', style: TextStyle(color: p.warn)),
           ]),
         ),
-      const SizedBox(height: 8),
-      if (ok) FilledButton(onPressed: busy ? null : _start, child: const Text('Start grid')),
+      const SizedBox(height: 12),
+      if (ok)
+        SizedBox(
+          height: 50,
+          child: FilledButton(
+            style: FilledButton.styleFrom(textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+            onPressed: busy ? null : _start,
+            child: Text('Start grid ${symbol.text.toUpperCase()}'),
+          ),
+        ),
     ]);
   }
 }
