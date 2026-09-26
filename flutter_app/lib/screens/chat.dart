@@ -3,7 +3,9 @@ import '../api.dart';
 import '../theme.dart';
 
 class ChatPage extends StatefulWidget {
-  const ChatPage({super.key});
+  final String? initialQuestion;
+  final Map<String, dynamic>? posContext;
+  const ChatPage({super.key, this.initialQuestion, this.posContext});
   @override
   State<ChatPage> createState() => _ChatPageState();
 }
@@ -48,6 +50,14 @@ class _ChatPageState extends State<ChatPage> {
   ];
 
   @override
+  void initState() {
+    super.initState();
+    if (widget.initialQuestion != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _send(widget.initialQuestion));
+    }
+  }
+
+  @override
   void dispose() {
     ctl.dispose();
     sc.dispose();
@@ -70,7 +80,9 @@ class _ChatPageState extends State<ChatPage> {
     _down();
     try {
       final history = msgs.sublist(0, msgs.length - 1).where((m) => m['content']!.isNotEmpty).toList();
-      await for (final chunk in Api.stream('/api/chat', method: 'POST', body: {'messages': history})) {
+      final body = <String, dynamic>{'messages': history};
+      if (widget.posContext != null) body['context'] = {'position': widget.posContext};
+      await for (final chunk in Api.stream('/api/chat', method: 'POST', body: body)) {
         if (!mounted) return;
         setState(() => msgs.last['content'] = msgs.last['content']! + chunk);
         _down();

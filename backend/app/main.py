@@ -3,12 +3,12 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from . import backtest, bot, digest, econ, engine, events, hypotheses, journal, llm, market, pin_reset, prefs, push, security, strategy, trade_api, tz, watcher, config as C
+from . import backtest, bot, digest, econ, engine, events, hypotheses, journal, llm, market, pin_reset, position_monitor, prefs, push, security, strategy, trade_api, tz, watcher, config as C
 
 
 @asynccontextmanager
 async def lifespan(app):
-    tasks = [asyncio.create_task(fn()) for fn in (watcher.run, push.run, econ.run, journal.run, digest.run)]
+    tasks = [asyncio.create_task(fn()) for fn in (watcher.run, push.run, econ.run, journal.run, digest.run, position_monitor.run)]
     yield
     for t in tasks:
         t.cancel()
@@ -56,6 +56,13 @@ async def positions():
         return await bot.positions()
     except Exception as e:
         raise HTTPException(502, str(e))
+
+
+@api.get("/positions/alerts")
+async def positions_alerts():
+    """In-app risk/opportunity alerts for tcexec-managed futures positions, from the background
+    monitor. Keyed by exchange symbol (e.g. "AVAXUSDT") so the app can match a card directly."""
+    return {"alerts": position_monitor.alerts_by_symbol()}
 
 
 class RiskIn(BaseModel):
@@ -183,6 +190,7 @@ class PrefsIn(BaseModel):
     general: dict | None = None
     setups: dict | None = None
     digest: dict | None = None
+    position_alerts: dict | None = None
 
 
 def _prefs_view(p):

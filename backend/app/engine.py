@@ -1026,9 +1026,31 @@ async def _chat_fallback(question, history=None, context=None):
     return _ai_unavailable_note() + HELP
 
 
+async def position_guidance(question, position):
+    """Answers a question about one specific live tcexec-managed position (the Positions tab's
+    'Ask AI' button), using the same strategy_report() every other screen already relies on, plus
+    the position's own live numbers. Purely informational: never proposes or takes any action."""
+    symbol = position.get("symbol", "")
+    base = symbol[:-4] if symbol.endswith("USDT") else symbol
+    style = _default_style()
+    lines = [f"Live position: {position.get('side')} {position.get('qty')} {symbol} @ entry "
+             f"{position.get('entry')}, mark {position.get('mark')}, uPnL {position.get('upnl')}, "
+             f"stop {position.get('stop', '-')}, target {position.get('tp', '-')}."]
+    if base in C.CRYPTO:
+        try:
+            lines.append(await strategy_report(base, style))
+        except Exception as e:
+            lines.append(f"(could not read the current {base} analysis: {e})")
+    lines.append("")
+    lines.append(f"Question: {question}")
+    return "\n".join(lines)
+
+
 async def answer(question, history=None, context=None):
     q = question.strip()
     ql = q.lower()
+    if context and context.get("position"):
+        return await position_guidance(q, context["position"])
     if _has(ql, "calendar", "red folder", "red-folder", "high impact", "high-impact", "economic", "nfp", "cpi", "fomc", "rate decision", "upcoming news"):
         return await calendar_text()
     if re.search(r"(forex|fx|gold|market|xau).{0,25}(open|closed|hours)|(open|closed).{0,15}(forex|fx|gold|market)|market hours|trading hours|forex hours", ql):

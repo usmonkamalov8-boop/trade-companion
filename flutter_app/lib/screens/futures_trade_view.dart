@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../api.dart';
 import '../theme.dart';
+import 'chat.dart';
 
 class FuturesTradeView extends StatefulWidget {
   const FuturesTradeView({super.key});
@@ -13,6 +14,8 @@ class FuturesTradeView extends StatefulWidget {
 class FuturesTradeViewState extends State<FuturesTradeView> with SingleTickerProviderStateMixin, AutomaticKeepAliveClientMixin {
   late TabController tab;
   Map<String, dynamic>? st;
+  Map<String, dynamic> alerts = {};
+  Map<String, dynamic> prefsData = {};
   String? err;
   Timer? timer;
   bool busy = false;
@@ -38,7 +41,21 @@ class FuturesTradeViewState extends State<FuturesTradeView> with SingleTickerPro
   Future<void> load() async {
     try {
       final s = await Api.get('/api/trade/status');
-      if (mounted) setState(() { st = s; err = null; });
+      var al = <String, dynamic>{};
+      try {
+        final a = await Api.get('/api/positions/alerts');
+        al = Map<String, dynamic>.from(a['alerts'] ?? {});
+      } catch (_) {
+        // alerts are advisory only; never let a failure here block the positions view itself
+      }
+      var pa = <String, dynamic>{};
+      try {
+        final pr = await Api.get('/api/prefs');
+        pa = Map<String, dynamic>.from(pr['position_alerts'] ?? {});
+      } catch (_) {
+        // the toggles just fall back to their built-in defaults if this fails
+      }
+      if (mounted) setState(() { st = s; err = null; alerts = al; prefsData = pa; });
     } catch (e) {
       if (mounted) setState(() => err = '$e');
     }
@@ -147,6 +164,16 @@ class FuturesTradeViewState extends State<FuturesTradeView> with SingleTickerPro
     load();
   }
 
+  Future<void> _savePrefs(Map<String, dynamic> patch) async {
+    try {
+      await Api.post('/api/prefs', {'position_alerts': patch});
+      _toast('Saved');
+    } catch (e) {
+      _toast('$e');
+    }
+    load();
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -244,6 +271,20 @@ class FuturesTradeViewState extends State<FuturesTradeView> with SingleTickerPro
           x['protected'] == true ? 'stop ${x['stop'] ?? '-'}   target ${x['tp'] ?? '-'}' : 'NO STOP ON THE EXCHANGE',
           style: TextStyle(color: x['protected'] == true ? p.muted : p.loss, fontSize: 12, fontWeight: x['protected'] == true ? FontWeight.normal : FontWeight.w700),
         ),
+        Builder(builder: (_) {
+          final alert = alerts[x['symbol']] as Map<String, dynamic>?;
+          if (alert == null) return const SizedBox.shrink();
+          final good = alert['level'] == 'success';
+          final c = good ? p.gain : p.warn;
+          return Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              decoration: BoxDecoration(color: c.withAlpha(30), borderRadius: BorderRadius.circular(8), border: Border.all(color: c)),
+              child: Text('${alert['text']}', style: TextStyle(fontSize: 12, color: c)),
+            ),
+          );
+        }),
         const SizedBox(height: 6),
         Row(children: [
           TextButton(
@@ -272,6 +313,13 @@ class FuturesTradeViewState extends State<FuturesTradeView> with SingleTickerPro
             child: const Text('Move stop'),
           ),
           TextButton(onPressed: () => _closePosition(x['symbol']), child: const Text('Close')),
+          TextButton(
+            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => ChatPage(
+              initialQuestion: 'What should I do with my ${x['symbol']} ${x['side']} position right now?',
+              posContext: x,
+            ))),
+            child: const Text('Ask AI'),
+          ),
         ]),
       ]),
     );
@@ -392,6 +440,19 @@ class FuturesTradeViewState extends State<FuturesTradeView> with SingleTickerPro
           _stepper(p, 'Max daily trades', cfg['max_daily_trades'], 1, 100, (v) => _saveConfig({'max_daily_trades': v})),
         ]),
       ),
+      Panel(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Position alerts', style: TextStyle(fontWeight: FontWeight.w700)),
+          const SizedBox(height: 4),
+          Text('Tunes the AI risk/opportunity alerts on your open positions - takes effect within a minute, no restart needed.', style: TextStyle(color: p.muted, fontSize: 12.5)),
+          const SizedBox(height: 10),
+          _stepper(p, 'Near stop/target threshold %', prefsData['near_pct'] ?? 0.35, 0.05, 5, (v) => _savePrefs({'near_pct': v}), step: 0.05, decimals: 2),
+          const SizedBox(height: 6),
+          _toggleRow(p, 'Structure-flip alerts', prefsData['structure_alerts'] ?? true, (v) => _savePrefs({'structure_alerts': v})),
+          _toggleRow(p, 'Weak-confluence alerts', prefsData['confidence_alerts'] ?? true, (v) => _savePrefs({'confidence_alerts': v})),
+          _toggleRow(p, 'Near stop/target alerts', prefsData['price_alerts'] ?? true, (v) => _savePrefs({'price_alerts': v})),
+        ]),
+      ),
     ]);
   }
 
@@ -404,6 +465,16 @@ class FuturesTradeViewState extends State<FuturesTradeView> with SingleTickerPro
         IconButton(icon: const Icon(Icons.remove_circle_outline), onPressed: v <= min ? null : () => onChanged((v - step).clamp(min, max)), visualDensity: VisualDensity.compact),
         SizedBox(width: 56, child: Text(v.toStringAsFixed(decimals), textAlign: TextAlign.center, style: numStyle.copyWith(fontWeight: FontWeight.w700))),
         IconButton(icon: const Icon(Icons.add_circle_outline), onPressed: v >= max ? null : () => onChanged((v + step).clamp(min, max)), visualDensity: VisualDensity.compact),
+      ]),
+    );
+  }
+
+  Widget _toggleRow(Pal p, String label, bool value, void Function(bool) onChanged) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(children: [
+        Expanded(child: Text(label, style: const TextStyle(fontSize: 13.5))),
+        Switch(value: value, onChanged: onChanged),
       ]),
     );
   }

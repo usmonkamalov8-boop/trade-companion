@@ -51,6 +51,7 @@ def defaults():
                    "loud_cap": 3},
         "digest": {"enabled": True, "day": 6, "hour": 18},
         "analyst": {"style": "intraday", "modules": {m: True for m in MODULES}, "news_scoring": True, "journal": True},
+        "position_alerts": {"near_pct": 0.35, "structure_alerts": True, "confidence_alerts": True, "price_alerts": True},
     }
 
 
@@ -196,6 +197,16 @@ def _clean(p):
             if isinstance(an.get(k), bool):
                 o[k] = an[k]
         out["analyst"] = o
+    pa = p.get("position_alerts") or {}
+    if isinstance(pa, dict):
+        o = {}
+        np_ = pa.get("near_pct")
+        if isinstance(np_, (int, float)) and not isinstance(np_, bool):
+            o["near_pct"] = max(0.05, min(5.0, round(float(np_), 2)))
+        for k in ("structure_alerts", "confidence_alerts", "price_alerts"):
+            if isinstance(pa.get(k), bool):
+                o[k] = pa[k]
+        out["position_alerts"] = o
     return out
 
 
