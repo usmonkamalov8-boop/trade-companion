@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from . import backtest, bot, digest, econ, engine, events, hypotheses, journal, llm, market, pin_reset, position_monitor, prefs, push, security, strategy, trade_api, tz, watcher, config as C
+from . import assistant_memory, backtest, bot, digest, econ, engine, events, hypotheses, journal, llm, market, pin_reset, position_monitor, prefs, push, security, strategy, trade_api, tz, watcher, config as C
 
 
 @asynccontextmanager
@@ -483,6 +483,20 @@ class Msg(BaseModel):
 
 class ChatIn(BaseModel):
     messages: list[Msg]
+    context: dict | None = None
+
+
+@api.get("/chat/history")
+async def chat_history():
+    """Recent persisted conversation, so the Assistant tab can reload where it left off after an app
+    restart (the in-memory list alone only survives tab switches, not the app being closed)."""
+    return {"messages": assistant_memory.recent_messages()}
+
+
+@api.delete("/chat/history")
+async def chat_history_clear():
+    assistant_memory.clear_messages()
+    return {"ok": True}
 
 
 @api.post("/chat")
@@ -494,7 +508,7 @@ async def chat(b: ChatIn):
 
     async def gen():
         try:
-            text = await engine.answer(msgs[-1]["content"], msgs)
+            text = await engine.answer(msgs[-1]["content"], msgs, b.context)
         except Exception as e:
             text = f"Something went wrong while analysing that: {e}"
         async for c in engine.typewriter(text):

@@ -54,6 +54,34 @@ class _ChatPageState extends State<ChatPage> {
     super.initState();
     if (widget.initialQuestion != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _send(widget.initialQuestion));
+    } else {
+      _loadHistory();
+    }
+  }
+
+  Future<void> _loadHistory() async {
+    try {
+      final r = await Api.get('/api/chat/history');
+      final list = (r['messages'] as List?) ?? [];
+      if (!mounted || list.isEmpty) return;
+      setState(() {
+        msgs.addAll(list.map((m) => <String, String>{
+              'role': (m['role'] ?? '').toString(),
+              'content': (m['content'] ?? '').toString(),
+            }));
+      });
+      _down();
+    } catch (_) {
+      // best-effort only - starting with an empty conversation is a fine fallback
+    }
+  }
+
+  Future<void> _clearHistory() async {
+    setState(msgs.clear);
+    try {
+      await Api.delete('/api/chat/history');
+    } catch (_) {
+      // local list is already cleared either way
     }
   }
 
@@ -105,7 +133,7 @@ class _ChatPageState extends State<ChatPage> {
         ]),
         actions: [
           IconButton(
-            onPressed: msgs.isEmpty ? null : () => setState(msgs.clear),
+            onPressed: msgs.isEmpty ? null : _clearHistory,
             icon: const Icon(Icons.delete_outline),
             tooltip: 'Clear conversation',
           ),

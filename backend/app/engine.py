@@ -9,7 +9,7 @@ Everything else (screener, backtest, digest, journal, positions, PnL, status, ca
 since those are precise-data requests where a paraphrase could blur or misstate a number."""
 import asyncio, re, time
 from datetime import datetime, timezone
-from . import analytics as A, backtest, bot, digest, events, hypotheses, journal, llm, market, prefs, strategy, tz as TZ, config as C
+from . import analytics as A, assistant_memory, backtest, bot, digest, events, hypotheses, journal, llm, market, prefs, strategy, tz as TZ, config as C
 
 _scan_cache = {}
 DISCLAIMER = "Rule-based analysis of live data. Not financial advice."
@@ -973,11 +973,15 @@ def _ai_unavailable_note():
 
 async def _natural(text, question, history=None):
     """Optionally rewrite an already-computed report as a natural reply (see the module docstring). Only
-    called for open-ended/opinion-style branches of answer() below - never for exact-data commands."""
+    called for open-ended/opinion-style branches of answer() below - never for exact-data commands. Also
+    passes a quick snapshot of the user's real current state (positions, bot status, remembered notes) as
+    background context, the same mechanism _chat_fallback() already used - so a follow-up like "should I
+    still hold it" gets the model reasoning with real position data in view, not just the report text."""
     if not llm.available():
         return text
     try:
-        rewritten = await llm.rewrite(question, text, history)
+        state = await _quick_state_summary()
+        rewritten = await llm.rewrite(question, text, history, extra_context=state)
     except Exception:
         rewritten = None
     if rewritten:
@@ -986,12 +990,13 @@ async def _natural(text, question, history=None):
 
 
 async def _quick_state_summary():
-    """A short, best-effort snapshot of the user's actual current state (open positions, bot status) for the
-    Assistant to have as background awareness on a general question - e.g. "how's it going" should be able to
-    reference real positions, not just describe what the app can do in the abstract. Never used to answer a
-    precise data question - those stay in their own exact, literal branches elsewhere in this file; this is
-    only extra context for a reply that would otherwise have none at all. Any failure here is silent (returns
-    None), since a fallback reply without this extra color is still far better than no reply at all."""
+    """A short, best-effort snapshot of the user's actual current state (open positions, bot status, and any
+    standing notes/preferences the user has explicitly asked to be remembered) for the Assistant to have as
+    background awareness on a general question - e.g. "how's it going" should be able to reference real
+    positions, not just describe what the app can do in the abstract. Never used to answer a precise data
+    question - those stay in their own exact, literal branches elsewhere in this file; this is only extra
+    context for a reply that would otherwise have none at all. Any failure here is silent (returns None),
+    since a fallback reply without this extra color is still far better than no reply at all."""
     parts = []
     try:
         pos = await positions_text()
@@ -1003,6 +1008,12 @@ async def _quick_state_summary():
         st = status_text()
         if st:
             parts.append(f"Bot status: {st[:200]}")
+    except Exception:
+        pass
+    try:
+        notes = assistant_memory.notes_text()
+        if notes:
+            parts.append(f"Things the user asked to be remembered:\n{notes}")
     except Exception:
         pass
     return "\n".join(parts) if parts else None
@@ -1047,6 +1058,25 @@ async def position_guidance(question, position):
 
 
 async def answer(question, history=None, context=None):
+    """Persistent-memory wrapper around _answer_core(): logs the user's question and the assistant's final
+    reply to assistant_memory (so a conversation survives an app restart, not just a tab switch - the
+    Flutter app already keeps ChatPage alive across tabs via IndexedStack), and captures a note when the
+    user's own wording explicitly asks to be remembered. All of this is best-effort logging around the
+    unchanged real logic in _answer_core(); a memory-write failure never blocks or changes the reply."""
+    try:
+        assistant_memory.log_message("user", question)
+        assistant_memory.maybe_capture_note(question)
+    except Exception:
+        pass
+    reply = await _answer_core(question, history, context)
+    try:
+        assistant_memory.log_message("assistant", reply)
+    except Exception:
+        pass
+    return reply
+
+
+async def _answer_core(question, history=None, context=None):
     q = question.strip()
     ql = q.lower()
     if context and context.get("position"):

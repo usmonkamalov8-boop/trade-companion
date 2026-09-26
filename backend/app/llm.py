@@ -153,13 +153,19 @@ async def _call(system, contents, max_tokens, timeout, max_retries=3, base_delay
     return None
 
 
-async def rewrite(question, data_text, history=None, max_tokens=1300, timeout=20):
+async def rewrite(question, data_text, history=None, max_tokens=1300, timeout=20, extra_context=None):
     """Returns a natural-language reply, or None (with _state updated) if Gemini isn't configured or the call
     failed. Used for open-ended/opinion questions that already matched a specific asset or topic - data_text
-    is the real, already-computed report; this only ever rephrases it, never adds to it."""
+    is the real, already-computed report; this only ever rephrases it, never adds to it. extra_context, when
+    given, is a short real snapshot of the user's actual state (positions, bot status, remembered notes) from
+    engine._quick_state_summary() - injected as its own turn first, exactly like chat() already does, so it
+    reads to the model as background it already knows rather than part of the market data or the question."""
     if not cfg()["key"]:
         return None
     contents = _history_contents(history)
+    if extra_context:
+        contents.append({"role": "user", "parts": [{"text": f"CURRENT APP STATE (background only, not something the person said):\n{extra_context}"}]})
+        contents.append({"role": "model", "parts": [{"text": "Understood, I'll use that directly when relevant."}]})
     contents.append({"role": "user", "parts": [{"text": f"MARKET DATA:\n{data_text[:6000]}\n\nQUESTION: {question}"}]})
     return await _call(SYSTEM, contents, max_tokens, timeout)
 
