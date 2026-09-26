@@ -149,7 +149,12 @@ class Client:
         if key in self._info and time.time() - self._info_ts.get(market, 0) < max_age:
             return self._info[key]
         path = "/fapi/v1/exchangeInfo" if market == "fut" else "/api/v3/exchangeInfo"
-        data = await self.call(market, "GET", path, None if market == "fut" else {"symbol": symbol}, signed=False)
+        # Always fetch the FULL exchange symbol list for this market, unfiltered - previously spot
+        # passed {"symbol": symbol} here, which Binance's spot exchangeInfo endpoint honors by
+        # returning only that one symbol, so the spot side of the cache could never hold more than
+        # whatever symbol last primed it (always "BTCUSDT" from service.py's /symbols endpoint).
+        # Futures already fetched unfiltered, which is why only spot was ever stuck on one pair.
+        data = await self.call(market, "GET", path, None, signed=False)
         for s in data["symbols"]:
             self._info[(market, s["symbol"])] = Sym(s)
         self._info_ts[market] = time.time()
