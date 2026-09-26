@@ -630,7 +630,11 @@ _an_cache = {}
 
 
 def _mods():
-    return prefs.get()["analyst"]["modules"]
+    """r3 runs as one unified, non-optional rule set - order blocks, market structure, FVGs, S/D, S/R,
+    Fibonacci, trendlines, liquidity, volume and ICT context are always all active together. This used
+    to read a per-module on/off dict out of prefs, but individually disabling a core r3 component isn't
+    a real option any more, so every module is hardcoded on here regardless of what's stored."""
+    return {m: True for m in strategy.MODULES}
 
 
 def _style_of(ql):

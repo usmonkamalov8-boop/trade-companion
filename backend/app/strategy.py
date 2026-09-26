@@ -520,6 +520,29 @@ def _taker(c, n=9):
     return sum(tb[-n - 1:-1]) / vol if vol > 0 else None
 
 
+CVD_WINDOW = 20
+
+
+def _cvd(c, n=CVD_WINDOW):
+    """Cumulative order flow (volume delta) over the last n CLOSED candles: net taker-buy volume minus
+    taker-sell volume, summed across the window and normalized by total volume traded in it, so it's a
+    bounded ratio (roughly -1..1) rather than a raw number that scales with a coin's liquidity. Also
+    returns the price change over the same window, so make_setup() can flag when price and order flow
+    disagree - a classic absorption / false-breakout signal (price moves one way while the volume that
+    actually traded argues the other way), which a single-candle snapshot like _taker() above can't see.
+    Same underlying Binance-provided arrays as _taker(), just summed over a longer window. None without
+    enough history."""
+    tb, v, cl = c.get("tb"), c.get("v"), c.get("c")
+    if not tb or not v or not cl or len(tb) != len(v) or len(v) < n + 2:
+        return None
+    tb_win, v_win, cl_win = tb[-n - 1:-1], v[-n - 1:-1], cl[-n - 1:-1]
+    vol = sum(v_win)
+    if vol <= 0 or not cl_win or cl_win[0] == 0:
+        return None
+    delta = sum(2 * b - t for b, t in zip(tb_win, v_win))
+    return {"ratio": delta / vol, "price_chg": (cl_win[-1] - cl_win[0]) / cl_win[0]}
+
+
 def analyze_tf(c, tf):
     n = len(c["c"])
     if n < (18 if tf == "1M" else 30 if tf == "1w" else 40):
@@ -544,7 +567,7 @@ def analyze_tf(c, tf):
             vr = (sum(v[-4:-1]) / 3.0) / base_v        # last 3 closed bars against the previous 30
     return {
         "vp": volume_profile(c, VP_BARS.get(tf, 150)),
-        "er": _efficiency(c["c"][-48:]), "taker": _taker(c),
+        "er": _efficiency(c["c"][-48:]), "taker": _taker(c), "cvd": _cvd(c),
         "spark": [float(f"{x:.8g}") for x in c["c"][-48:]],
         "rsi": rs[-1], "macd": A.macd_hist(c["c"]), "div": divergence(alt, rs, n), "vol_ratio": vr,
         "tf": tf, "n": n, "price": px, "atr": a, "atr_pct": a / px * 100, "atr_ratio": a / (sum(win) / len(win)),
@@ -1045,6 +1068,23 @@ def make_setup(name, style, per, ict, dec, mods, kind, per_all=None, news=None, 
                 add("taker", "Order flow", 4, f"{tk * 100:.0f}% {'buy' if s == 1 else 'sell'}-side taker flow on {tfl(setup['tf'])} agrees with the {word}")
             elif (s == 1 and tk <= 0.45) or (s == -1 and tk >= 0.55):
                 add("taker", "Order flow", -4, f"{tk * 100:.0f}% {'sell' if s == 1 else 'buy'}-side taker flow on {tfl(setup['tf'])} is against the {word}")
+        # Cumulative order flow: added at your explicit request, without a validated backtest behind it yet
+        # (same honesty caveat as BTC alignment below) - a longer window than the single-candle taker ratio
+        # above, specifically to catch absorption / false-breakout patterns: price moving one way over the
+        # window while the NET volume that actually traded argues the other way.
+        cvd = setup.get("cvd")
+        if cvd is not None:
+            ratio, price_chg = cvd["ratio"], cvd["price_chg"]
+            if (s == 1 and ratio >= 0.08) or (s == -1 and ratio <= -0.08):
+                add("cvd", "Cumulative order flow", 5,
+                    f"Net taker flow over the last {CVD_WINDOW} {tfl(setup['tf'])} candles is "
+                    f"{abs(ratio) * 100:.0f}% {'buy' if ratio > 0 else 'sell'}-side, backing the {word}")
+            elif (price_chg > 0) != (ratio > 0) and abs(price_chg) > 0.002 and abs(ratio) >= 0.06:
+                against = "up" if price_chg > 0 else "down"
+                add("cvd", "Cumulative order flow", -7,
+                    f"Price has moved {against} over the last {CVD_WINDOW} {tfl(setup['tf'])} candles but net "
+                    f"taker flow disagrees ({ratio * 100:+.0f}%) - possible absorption / false move, not "
+                    f"backed by real buying or selling")
         # BTC alignment: added at your explicit request, without a validated backtest behind it yet (unlike
         # r1->r2, which WAS backed by a replicated backtest finding) - kept as a modest weight for that reason,
         # matching other minor factors rather than a dominant one. The underlying bias/setup values were
@@ -1281,11 +1321,13 @@ def shadow_features(res, funding=None, btc=None):
     d = 1 if s["direction"] == "long" else -1
     r4 = lambda x: None if x is None else round(x, 4)
     er = sa.get("er")
+    cvd_s, cvd_5 = sa.get("cvd"), (allp.get("5m") or {}).get("cvd")
     f = {"er_setup": r4(er), "er_bias": r4(ba.get("er") if ba else None),
          "regime": None if er is None else ("trend" if er >= 0.30 else "range"),
          "atr_ratio": r4(sa.get("atr_ratio")), "vol_ratio": r4(sa.get("vol_ratio")),
          "stop_pct": r4((s.get("risk") or {}).get("stop_pct")), "stop_atr": r4((s.get("risk") or {}).get("stop_atr")),
          "taker_setup": r4(sa.get("taker")), "taker_5m": r4((allp.get("5m") or {}).get("taker")),
+         "cvd_setup": r4(cvd_s["ratio"]) if cvd_s else None, "cvd_5m": r4(cvd_5["ratio"]) if cvd_5 else None,
          "funding": r4(funding), "btc_bias": None, "btc_setup": None, "btc_align": None}
     if btc:
         f["btc_bias"], f["btc_setup"] = btc.get("bias"), btc.get("setup")

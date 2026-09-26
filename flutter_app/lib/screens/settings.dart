@@ -7,19 +7,6 @@ import '../events.dart';
 import '../prefs.dart';
 import '../theme.dart';
 
-const moduleLabels = {
-  'structure': 'Market structure (BOS / CHoCH)',
-  'ob': 'Order blocks and breakers',
-  'fvg': 'Fair value gaps',
-  'sd': 'Supply and demand zones',
-  'sr': 'Support and resistance',
-  'fib': 'Fibonacci and premium / discount',
-  'trend': 'Trendlines, channels, dynamic levels',
-  'liquidity': 'Liquidity and sweeps',
-  'volume': 'Volume profile (POC, value area) and volume checks',
-  'ict': 'ICT context (kill zones, day and week levels)',
-};
-
 const styleLabels = {'scalp': 'Scalp', 'intraday': 'Intraday', 'swing': 'Swing'};
 
 Future<void> pushPage(BuildContext context, Widget page) =>
@@ -1239,7 +1226,6 @@ class _AnalystPageState extends State<AnalystPage> {
         listenable: ServerPrefs.I,
         builder: (context, _) {
           final an = ServerPrefs.I.section('analyst');
-          final mods = (an['modules'] as Map?)?.cast<String, dynamic>() ?? {};
           final style = '${an['style'] ?? 'intraday'}';
           return ListView(padding: const EdgeInsets.all(12), children: [
             const Heading('Default trading style'),
@@ -1280,21 +1266,20 @@ class _AnalystPageState extends State<AnalystPage> {
                 ),
               ]),
             ),
-            const Heading('Concepts to include'),
+            const Heading('Strategy engine (r3)'),
             Panel(
-              padding: const EdgeInsets.symmetric(vertical: 4),
-              child: Column(children: [
-                for (final e in moduleLabels.entries)
-                  SwitchListTile(
-                    dense: true,
-                    title: Text(e.value),
-                    value: mods[e.key] != false,
-                    onChanged: (v) => ServerPrefs.I.update({'analyst': {'modules': {e.key: v}}}),
-                  ),
-              ]),
+              padding: const EdgeInsets.all(14),
+              child: Text(
+                'The full r3 rule set runs on every read, and none of it is individually switchable:\n\n'
+                '\u2022 Unmitigated order blocks, market structure (BOS / CHoCH), Fibonacci premium / '
+                'discount / OTE, liquidity sweeps, and trendlines\n'
+                '\u2022 A hard minimum of 3 distinct confluences, checked across all 7 timeframes '
+                '(monthly down to 5m)\n'
+                '\u2022 Your own drawn S/R levels always take top priority, alongside BTC macro '
+                'correlation',
+                style: TextStyle(color: p.muted, fontSize: 12.5, height: 1.5),
+              ),
             ),
-            Text('Switching a concept off hides it from reports and removes it from the zones used to build setups.',
-                style: TextStyle(color: p.muted, fontSize: 12.5, height: 1.4)),
           ]);
         },
       ),

@@ -50,7 +50,7 @@ def defaults():
                    "quiet": {"enabled": False, "from": "23:00", "to": "07:00", "allow_urgent": False},
                    "loud_cap": 3},
         "digest": {"enabled": True, "day": 6, "hour": 18},
-        "analyst": {"style": "intraday", "modules": {m: True for m in MODULES}, "news_scoring": True, "journal": True},
+        "analyst": {"style": "intraday", "news_scoring": True, "journal": True},
         "position_alerts": {"near_pct": 0.35, "structure_alerts": True, "confidence_alerts": True, "price_alerts": True},
     }
 
@@ -191,8 +191,10 @@ def _clean(p):
         o = {}
         if an.get("style") in STYLES:
             o["style"] = an["style"]
-        if isinstance(an.get("modules"), dict):
-            o["modules"] = {k: bool(v) for k, v in an["modules"].items() if k in MODULES}
+        # Per-module on/off toggles were removed - the full r3 rule set (order blocks, market
+        # structure, FVGs, S/D, S/R, Fibonacci, trendlines, liquidity, volume, ICT context) always
+        # runs together as one unified system now; see engine._mods(). A "modules" key in an
+        # incoming patch (e.g. from a stale app build) is silently dropped here.
         for k in ("news_scoring", "journal"):
             if isinstance(an.get(k), bool):
                 o[k] = an[k]
